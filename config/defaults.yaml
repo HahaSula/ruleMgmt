@@ -1,0 +1,8 @@
+defaultFor: "5m"
+defaultSeverity: warning
+versionFormat: "v{major}.{minor}.{patch}"
+stages:
+  - DEV
+  - TEST
+  - STG
+  - PROD
