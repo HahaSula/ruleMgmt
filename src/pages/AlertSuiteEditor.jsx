@@ -286,7 +286,11 @@ export default function AlertSuiteEditor() {
                     {rule.vars.length > 0 && (
                       <div className="form-row">
                         <label>Var Values</label>
-                        <table className="kv-table" style={{ width: '100%' }}>
+                        <table className="kv-table" style={{ width: '100%', tableLayout: 'fixed' }}>
+                          <colgroup>
+                            <col style={{ width: '35%' }} />
+                            <col style={{ width: '65%' }} />
+                          </colgroup>
                           <thead>
                             <tr><th>var name</th><th>value</th></tr>
                           </thead>
@@ -298,7 +302,10 @@ export default function AlertSuiteEditor() {
                                     style={{ background: '#f9fafb', color: '#6b7280' }} />
                                 </td>
                                 <td>
-                                  <input type="text" value={v.value} placeholder="fill value"
+                                  <textarea value={v.value} placeholder="fill value"
+                                    rows={1}
+                                    style={{ resize: 'none', overflowY: 'hidden', width: '100%', minHeight: 'unset', fontFamily: 'inherit' }}
+                                    onInput={e => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px' }}
                                     onChange={e => {
                                       const vars = rule.vars.map((vv, vvi) =>
                                         vvi === vi ? { ...vv, value: e.target.value } : vv)

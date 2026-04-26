@@ -188,16 +188,36 @@ app.post('/api/templates/:type/:name/:version', async (req, res) => {
   }
 
   const chartFile = path.join(dir, 'Chart.yaml')
-  try {
-    await fs.access(chartFile)
-  } catch {
+  const semver = version.replace(/^v/, '')
+  if (type === 'system') {
+    const suiteName = req.body.data?.system?.alertSuite
+    const suiteVersion = (req.body.data?.system?.alertSuiteVersion || '').replace(/^v/, '')
     const chart = {
       apiVersion: 'v2',
       name,
-      version: version.replace(/^v/, ''),
-      type: 'application'
+      version: semver,
+      type: 'application',
     }
-    await fs.writeFile(chartFile, yaml.dump(chart), 'utf-8')
+    if (suiteName && suiteVersion) {
+      chart.dependencies = [{
+        name: suiteName,
+        version: suiteVersion,
+        repository: `file://../../../alert-suite/${suiteName}/v${suiteVersion}`,
+      }]
+    }
+    await fs.writeFile(chartFile, yaml.dump(chart, { lineWidth: -1 }), 'utf-8')
+  } else {
+    try {
+      await fs.access(chartFile)
+    } catch {
+      const chart = {
+        apiVersion: 'v2',
+        name,
+        version: semver,
+        type: 'application'
+      }
+      await fs.writeFile(chartFile, yaml.dump(chart), 'utf-8')
+    }
   }
 
   res.json({ ok: true })
@@ -296,16 +316,21 @@ app.delete('/api/gitops/:product/:site/:relunit', async (req, res) => {
   res.json({ ok: true })
 })
 
-// Get stage values.yaml
+// Get stage values.yaml + Chart.yaml
 app.get('/api/gitops/:product/:site/:relunit/:stage', async (req, res) => {
   const { product, site, relunit, stage } = req.params
-  const file = path.join(GITOPS_DIR, product, site, relunit, stage, 'values.yaml')
+  const stageDir = path.join(GITOPS_DIR, product, site, relunit, stage)
+  let values = { exists: false, parsed: null }
+  let chart = { exists: false, parsed: null }
   try {
-    const content = await fs.readFile(file, 'utf-8')
-    res.json({ exists: true, parsed: yaml.load(content) })
-  } catch {
-    res.json({ exists: false, parsed: null })
-  }
+    const content = await fs.readFile(path.join(stageDir, 'values.yaml'), 'utf-8')
+    values = { exists: true, parsed: yaml.load(content) }
+  } catch { /* no values.yaml */ }
+  try {
+    const content = await fs.readFile(path.join(stageDir, 'Chart.yaml'), 'utf-8')
+    chart = { exists: true, parsed: yaml.load(content) }
+  } catch { /* no Chart.yaml */ }
+  res.json({ exists: values.exists, parsed: values.parsed, chart })
 })
 
 // Save stage values.yaml + optional Chart.yaml (enables the stage)
@@ -380,12 +405,14 @@ app.post('/api/helm/render/:product/:site/:relunit/:stage', async (req, res) => 
 
     // Step 1: helm dep update on system chart (resolves its alert-suite dependency)
     if (systemChartDir) {
+      await fs.rm(path.join(systemChartDir, 'Chart.lock'), { force: true })
       log.push(`→ helm dependency update (system chart)`)
       const out1 = await runCmd(helm, ['dependency', 'update', systemChartDir], REPO_ROOT)
       log.push(out1.trim())
     }
 
-    // Step 2: helm dep update on the stage chart
+    // Step 2: helm dep update on the stage chart (delete stale lock so helm re-packages system chart)
+    await fs.rm(path.join(stageDir, 'Chart.lock'), { force: true })
     log.push(`→ helm dependency update (stage)`)
     const out2 = await runCmd(helm, ['dependency', 'update'], stageDir)
     log.push(out2.trim())

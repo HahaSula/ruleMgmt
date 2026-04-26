@@ -171,17 +171,29 @@ export default function GitopsEditor() {
     const d = await getStage(product, site, relunit, stage)
     const p = d.parsed || {}
 
-    // Extract stored values from under the chartName key (scoped values)
-    const chartNameKey = Object.keys(p).find(k => k !== 'system') || ''
-    const overrides = p[chartNameKey]
-      ? objectToKvArray(p[chartNameKey])
-      : objectToKvArray({})
+    // Restore system name + version from Chart.yaml dependency repository URL
+    let systemName = ''
+    let systemVersion = ''
+    let chartName = ''
+    const dep = d.chart?.parsed?.dependencies?.[0]
+    if (dep?.repository) {
+      const m = dep.repository.match(/templates\/system\/([^/]+)\/([^/]+)$/)
+      if (m) { systemName = m[1]; systemVersion = m[2] }
+      chartName = dep.name || ''
+    }
 
-    // Try to detect system name/version from the chart key itself or defaults
+    // Extract stored values from under the chartName key (scoped values)
+    const overrideKey = chartName || Object.keys(p)[0] || ''
+    const overrides = p[overrideKey]
+      ? objectToKvArray(p[overrideKey])
+      : []
+
     setStageForm(f => ({
       ...f,
-      systemName: f.systemName,
-      systemVersion: f.systemVersion,
+      systemName,
+      systemVersion,
+      chartName,
+      chartSemver: dep?.version ? String(dep.version) : '',
       overrides,
     }))
   }
