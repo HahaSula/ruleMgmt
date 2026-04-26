@@ -6,9 +6,11 @@ import { bumpPatch } from '../utils/templateUtils'
 const TYPE = 'system'
 const SEVERITIES = ['critical', 'warning', 'info', 'none']
 
-const emptyRoute = () => ({ severity: 'critical', receiver: '' })
-const emptyForm  = () => ({
-  alertSuiteName:    '',
+const emptyRoute  = () => ({ severity: 'critical', receiver: '' })
+const emptyForm   = () => ({
+  templateName:      '',   // folder name shown in list
+  systemName:        '',   // metadata.name in AlertmanagerConfig (system.name in values.yaml)
+  alertSuiteName:    '',   // which alert group to reference
   alertSuiteVersion: '',
   groupLabel:        '',
   routes:            [],
@@ -16,8 +18,8 @@ const emptyForm  = () => ({
 
 export default function SystemEditor() {
   const [templates, setTemplates] = useState({})
-  const [suites, setSuites]       = useState({})    // { name: [version] }
-  const [receivers, setReceivers] = useState({})    // { name: [version] }
+  const [suites, setSuites]       = useState({})
+  const [receivers, setReceivers] = useState({})
   const [selected, setSelected]   = useState(null)
   const [form, setForm]           = useState(emptyForm())
   const [isNew, setIsNew]         = useState(false)
@@ -41,6 +43,8 @@ export default function SystemEditor() {
     if (!data) return
     const s = data.parsed?.system || {}
     setForm({
+      templateName:      name,
+      systemName:        s.name              || '',
       alertSuiteName:    s.alertSuite        || '',
       alertSuiteVersion: s.alertSuiteVersion || '',
       groupLabel:        s.groupLabel        || '',
@@ -56,8 +60,8 @@ export default function SystemEditor() {
     setIsNew(true)
   }
 
-  const suiteVersions    = form.alertSuiteName ? (suites[form.alertSuiteName] || []) : []
-  const receiverNames    = Object.keys(receivers)
+  const suiteVersions = form.alertSuiteName ? (suites[form.alertSuiteName] || []) : []
+  const receiverNames = Object.keys(receivers)
 
   function updateRoute(i, field, val) {
     setForm(f => ({ ...f, routes: f.routes.map((r, idx) => idx === i ? { ...r, [field]: val } : r) }))
@@ -68,6 +72,7 @@ export default function SystemEditor() {
   function buildPayload() {
     return {
       system: {
+        name:              form.systemName,
         alertSuite:        form.alertSuiteName,
         alertSuiteVersion: form.alertSuiteVersion || 'latest',
         groupLabel:        form.groupLabel,
@@ -78,7 +83,7 @@ export default function SystemEditor() {
 
   async function handleSave(version) {
     setModal(null)
-    const name = selected?.name || `system-${Date.now()}`
+    const name = form.templateName.trim() || selected?.name || `system-${Date.now()}`
     await saveTemplate(TYPE, name, version, buildPayload())
     await load()
     setSelected({ name, version })
@@ -140,15 +145,32 @@ export default function SystemEditor() {
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div className="form-row">
-                  <label>Alert Suite</label>
+                  <label>Template Name *</label>
+                  <input type="text" value={form.templateName}
+                    placeholder="e.g. mysql-system"
+                    readOnly={!isNew && !!selected}
+                    style={!isNew && selected ? { background: '#f9fafb', color: '#6b7280' } : {}}
+                    onChange={e => setForm(f => ({ ...f, templateName: e.target.value }))} />
+                </div>
+                <div className="form-row">
+                  <label>Config Name</label>
+                  <input type="text" value={form.systemName}
+                    placeholder="name in AlertmanagerConfig metadata"
+                    onChange={e => setForm(f => ({ ...f, systemName: e.target.value }))} />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 4 }}>
+                <div className="form-row">
+                  <label>Alert Group</label>
                   <select value={form.alertSuiteName}
                     onChange={e => setForm(f => ({ ...f, alertSuiteName: e.target.value, alertSuiteVersion: '' }))}>
-                    <option value="">— select alert suite —</option>
+                    <option value="">— select alert group —</option>
                     {Object.keys(suites).map(n => <option key={n} value={n}>{n}</option>)}
                   </select>
                 </div>
                 <div className="form-row">
-                  <label>Suite Version</label>
+                  <label>Group Version</label>
                   <select value={form.alertSuiteVersion}
                     onChange={e => setForm(f => ({ ...f, alertSuiteVersion: e.target.value }))}>
                     <option value="">— latest —</option>
@@ -170,13 +192,13 @@ export default function SystemEditor() {
                 <button className="btn btn-secondary btn-sm" onClick={addRoute}>+ Add Route</button>
               </div>
               <p className="text-muted" style={{ marginBottom: 10 }}>
-                Maps severity labels to receiver template names.
+                Maps severity labels to receiver names. Names will get product prefix when rendered.
               </p>
               {form.routes.length === 0 && <p className="text-muted">No routes configured yet.</p>}
 
               <table className="kv-table" style={{ width: '100%' }}>
                 <thead>
-                  <tr><th>Severity</th><th>Receiver</th><th></th></tr>
+                  <tr><th>Severity</th><th>Receiver Name</th><th></th></tr>
                 </thead>
                 <tbody>
                   {form.routes.map((route, i) => (
@@ -187,15 +209,16 @@ export default function SystemEditor() {
                         </select>
                       </td>
                       <td>
-                        {receiverNames.length > 0 ? (
-                          <select value={route.receiver} onChange={e => updateRoute(i, 'receiver', e.target.value)}>
-                            <option value="">— select receiver —</option>
-                            {receiverNames.map(n => <option key={n} value={n}>{n}</option>)}
-                          </select>
-                        ) : (
-                          <input type="text" value={route.receiver} placeholder="receiver name"
-                            onChange={e => updateRoute(i, 'receiver', e.target.value)} />
-                        )}
+                        <input
+                          type="text"
+                          list={`receiver-list-${i}`}
+                          value={route.receiver}
+                          placeholder="receiver name"
+                          onChange={e => updateRoute(i, 'receiver', e.target.value)}
+                        />
+                        <datalist id={`receiver-list-${i}`}>
+                          {receiverNames.map(n => <option key={n} value={n} />)}
+                        </datalist>
                       </td>
                       <td>
                         <button className="btn btn-ghost btn-icon" onClick={() => removeRoute(i)}>×</button>

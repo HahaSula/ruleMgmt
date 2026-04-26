@@ -6,3 +6,4 @@ stages:
   - TEST
   - STG
   - PROD
+product: "test"

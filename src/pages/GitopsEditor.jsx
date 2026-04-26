@@ -5,6 +5,7 @@ import {
   listRelunits, createRelunit, deleteRelunit,
   getStage, saveStage, deleteStage,
   listTemplates, getSystemChartMeta, runHelmRender,
+  getDefaults, saveDefaults,
 } from '../utils/api'
 import KVEditor from '../components/KVEditor'
 import { objectToKvArray, kvArrayToObject } from '../utils/templateUtils'
@@ -70,6 +71,12 @@ export default function GitopsEditor() {
   // Enabled stages cache: { "site/rel/stage": bool }
   const [enabledStages, setEnabledStages] = useState({})
 
+  // Product prefix settings (from config/defaults.yaml)
+  const [defaults, setDefaults]           = useState({})
+  const [productPfx, setProductPfx]       = useState('')
+  const [productPfxInput, setProductPfxInput] = useState('')
+  const [productPfxEditing, setProductPfxEditing] = useState(false)
+
   const loadAll = useCallback(async () => {
     const [p, sys] = await Promise.all([getProduct(), listTemplates('system')])
     setSystems(sys)
@@ -85,6 +92,15 @@ export default function GitopsEditor() {
   }, [])
 
   useEffect(() => { loadAll() }, [loadAll])
+
+  useEffect(() => {
+    getDefaults().then(d => {
+      const p = d.parsed?.product || ''
+      setDefaults(d.parsed || {})
+      setProductPfx(p)
+      setProductPfxInput(p)
+    })
+  }, [])
 
   // Refresh enabled-stages map whenever tree changes
   useEffect(() => {
@@ -245,6 +261,14 @@ export default function GitopsEditor() {
     setHelmOutput(result.output || '')
   }
 
+  async function handleSaveProductPfx() {
+    const updated = { ...defaults, product: productPfxInput.trim() }
+    await saveDefaults(updated)
+    setDefaults(updated)
+    setProductPfx(productPfxInput.trim())
+    setProductPfxEditing(false)
+  }
+
   const systemVersions = stageForm.systemName ? (systems[stageForm.systemName] || []) : []
 
   const systemRef = stageForm.systemName && stageForm.systemVersion
@@ -358,6 +382,34 @@ export default function GitopsEditor() {
 
       {/* ── Detail panel ── */}
       <div className="gitops-detail">
+        {/* Product prefix settings */}
+        <div className="form-card" style={{ marginBottom: 16 }}>
+          <div className="form-card-title" style={{ marginBottom: 8 }}>
+            Alert Product Prefix
+            <span className="text-muted" style={{ fontSize: 11 }}>
+              prefixes rendered resource names ({'{product}-{name}'})
+            </span>
+          </div>
+          {productPfxEditing ? (
+            <div className="inline-add" style={{ padding: 0 }}>
+              <input type="text" value={productPfxInput} autoFocus placeholder="e.g. mysql"
+                onChange={e => setProductPfxInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleSaveProductPfx(); if (e.key === 'Escape') setProductPfxEditing(false) }} />
+              <button className="btn btn-primary btn-sm" onClick={handleSaveProductPfx}>Save</button>
+              <button className="btn btn-ghost btn-sm" onClick={() => setProductPfxEditing(false)}>Cancel</button>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <code style={{ background: '#f3f4f6', padding: '3px 10px', borderRadius: 4, fontSize: 13, minWidth: 60 }}>
+                {productPfx || '(none)'}
+              </code>
+              <button className="btn btn-ghost btn-sm" onClick={() => { setProductPfxInput(productPfx); setProductPfxEditing(true) }}>
+                Edit
+              </button>
+            </div>
+          )}
+        </div>
+
         {!selection ? (
           <div className="empty-state">
             <div className="empty-state-icon">🚀</div>

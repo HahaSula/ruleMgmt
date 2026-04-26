@@ -1,10 +1,31 @@
-// Render Go-style template expr {{ .varName }} substituting vars object
+// Render Go-style template expr with var substitution and int arithmetic
+// Supports: {{ .varName }}, {{ .varName + N }}, {{ .varName - N }}, etc.
 export function renderExpr(expr, vars) {
   if (!expr) return ''
-  return expr.replace(/\{\{\s*\.(\w+)\s*\}\}/g, (match, key) => {
+  // First pass: arithmetic expressions {{ .varName OP N }}
+  let result = expr.replace(
+    /\{\{\s*\.(\w+)\s*([+\-*/])\s*(\d+(?:\.\d+)?)\s*\}\}/g,
+    (match, key, op, rhs) => {
+      const val = vars[key]
+      if (val === undefined) return match
+      const lhs = parseFloat(val)
+      const r   = parseFloat(rhs)
+      if (isNaN(lhs)) return match
+      let res
+      if (op === '+') res = lhs + r
+      else if (op === '-') res = lhs - r
+      else if (op === '*') res = lhs * r
+      else if (op === '/') res = r !== 0 ? lhs / r : NaN
+      if (isNaN(res)) return match
+      return Number.isInteger(res) ? String(res) : res.toFixed(6).replace(/\.?0+$/, '')
+    }
+  )
+  // Second pass: simple substitution {{ .varName }}
+  result = result.replace(/\{\{\s*\.(\w+)\s*\}\}/g, (match, key) => {
     const val = vars[key]
     return val !== undefined ? String(val) : match
   })
+  return result
 }
 
 // Convert [{key, value}] array to plain object; skip empty keys

@@ -7,7 +7,7 @@ import GitopsEditor from './pages/GitopsEditor'
 
 const NAV_ITEMS = [
   { id: 'alert-type',   label: 'Alert Type',   icon: '⚡' },
-  { id: 'alert-suite',  label: 'Alert Suite',  icon: '📦' },
+  { id: 'alert-suite',  label: 'Alert Group',  icon: '📦' },
   { id: 'receivers',    label: 'Receivers',    icon: '📣' },
   { id: 'system',       label: 'System',       icon: '🔧' },
   { id: 'gitops',       label: 'Gitops Deploy',icon: '🚀' },

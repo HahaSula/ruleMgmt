@@ -117,6 +117,22 @@ export async function getSystemChartMeta(name, version) {
   return res.json()
 }
 
+// ─── Defaults ─────────────────────────────────────────────────────────────────
+
+export async function getDefaults() {
+  const res = await fetch(`${BASE}/defaults`)
+  return res.json()
+}
+
+export async function saveDefaults(data) {
+  const res = await fetch(`${BASE}/defaults`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data })
+  })
+  return res.json()
+}
+
 // ─── Helm render ──────────────────────────────────────────────────────────────
 
 export async function runHelmRender(product, site, relunit, stage) {

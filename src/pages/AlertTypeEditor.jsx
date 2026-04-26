@@ -5,22 +5,28 @@ import { listTemplates, getTemplate, saveTemplate, deleteTemplate } from '../uti
 import { kvArrayToObject, objectToKvArray, bumpPatch, latestVersion } from '../utils/templateUtils'
 
 const TYPE = 'alert-type'
+const VAR_TYPES = ['string', 'metrics', 'op', 'func', 'time', 'int']
 
-// Render expr preview using var names as their own placeholder values
+// Render expr preview — substitutes {{ .varName }} and {{ .varName OP N }} with placeholders
 function previewExpr(expr, varDecls) {
   if (!expr) return ''
   const map = {}
   for (const v of varDecls) {
     if (v.name.trim()) map[v.name.trim()] = `<${v.name.trim()}>`
   }
-  return expr.replace(/\{\{\s*\.(\w+)\s*\}\}/g, (match, key) => map[key] ?? match)
+  let result = expr.replace(
+    /\{\{\s*\.(\w+)\s*([+\-*/])\s*(\d+(?:\.\d+)?)\s*\}\}/g,
+    (match, key, op, rhs) => map[key] ? `<${key}${op}${rhs}>` : match
+  )
+  result = result.replace(/\{\{\s*\.(\w+)\s*\}\}/g, (match, key) => map[key] ?? match)
+  return result
 }
 
 const emptyForm = () => ({
   name: '',
   description: '',
   expr: '',
-  vars: [],       // [{ name, description }]
+  vars: [],       // [{ name, description, type }]
   for: '',
   labels: [],     // [{ key, value }]
 })
@@ -46,9 +52,13 @@ export default function AlertTypeEditor() {
       name:        p.name        || name,
       description: p.description || '',
       expr:        p.expr        || '',
-      vars:        (p.vars || []).map(v => ({ name: v.name || '', description: v.description || '' })),
-      for:         p.for         || '',
-      labels:      objectToKvArray(p.labels || {}),
+      vars: (p.vars || []).map(v => ({
+        name:        v.name        || '',
+        description: v.description || '',
+        type:        v.type        || 'string',
+      })),
+      for:    p.for    || '',
+      labels: objectToKvArray(p.labels || {}),
     })
     setSelected({ name, version })
     setIsNew(false)
@@ -66,7 +76,11 @@ export default function AlertTypeEditor() {
       expr: form.expr,
       vars: form.vars
         .filter(v => v.name.trim())
-        .map(v => ({ name: v.name.trim(), ...(v.description && { description: v.description }) })),
+        .map(v => ({
+          name: v.name.trim(),
+          type: v.type || 'string',
+          ...(v.description && { description: v.description }),
+        })),
     }
     if (form.description) out.description = form.description
     if (form.for) out.for = form.for
@@ -102,9 +116,8 @@ export default function AlertTypeEditor() {
     await load()
   }
 
-  // Vars list helpers
-  function addVar() { setForm(f => ({ ...f, vars: [...f.vars, { name: '', description: '' }] })) }
-  function removeVar(i) { setForm(f => ({ ...f, vars: f.vars.filter((_, idx) => idx !== i) })) }
+  function addVar()          { setForm(f => ({ ...f, vars: [...f.vars, { name: '', description: '', type: 'string' }] })) }
+  function removeVar(i)      { setForm(f => ({ ...f, vars: f.vars.filter((_, idx) => idx !== i) })) }
   function updateVar(i, field, val) {
     setForm(f => ({ ...f, vars: f.vars.map((v, idx) => idx === i ? { ...v, [field]: val } : v) }))
   }
@@ -113,7 +126,6 @@ export default function AlertTypeEditor() {
 
   return (
     <div className="editor-layout">
-      {/* ── Left list ── */}
       <div className="editor-list">
         <div className="editor-list-header">
           Alert Types
@@ -139,7 +151,6 @@ export default function AlertTypeEditor() {
         </div>
       </div>
 
-      {/* ── Right form ── */}
       <div className="editor-form">
         {!isNew && !selected ? (
           <div className="empty-state">
@@ -170,9 +181,11 @@ export default function AlertTypeEditor() {
               <div className="form-row">
                 <label>Expr *</label>
                 <textarea rows={2} value={form.expr}
-                  placeholder={'{{ .metrics }} {{ .op }} {{ .constant }}'}
+                  placeholder={'{{ .func }}({{ .metrics }}[{{ .time }}]) {{ .op }} {{ .threshold }}'}
                   onChange={e => setForm(f => ({ ...f, expr: e.target.value }))} />
-                <span className="text-muted">Use Go template syntax: {'{{ .varName }}'}</span>
+                <span className="text-muted">
+                  {'Use {{ .varName }} for substitution, {{ .intVar + 10 }} for arithmetic.'}
+                </span>
               </div>
 
               <div className="form-row">
@@ -182,20 +195,26 @@ export default function AlertTypeEditor() {
               </div>
             </div>
 
-            {/* Vars declarations */}
             <div className="form-card">
               <div className="form-card-title">
                 Var Declarations
                 <button className="btn btn-secondary btn-sm" onClick={addVar}>+ Add Var</button>
               </div>
               <p className="text-muted" style={{ marginBottom: 10 }}>
-                Declare parameter names exposed to Alert Suite. Alert Suite fills in actual values.
+                Declare parameters with types. Alert Group fills in actual values.
               </p>
               {form.vars.length === 0 && <p className="text-muted">No vars declared yet.</p>}
-              <table className="kv-table" style={{ width: '100%' }}>
+              <table className="kv-table" style={{ width: '100%', tableLayout: 'fixed' }}>
+                <colgroup>
+                  <col style={{ width: '28%' }} />
+                  <col style={{ width: '18%' }} />
+                  <col />
+                  <col style={{ width: '32px' }} />
+                </colgroup>
                 <thead>
                   <tr>
-                    <th style={{ width: '35%' }}>name</th>
+                    <th>name</th>
+                    <th>type</th>
                     <th>description</th>
                     <th></th>
                   </tr>
@@ -206,6 +225,11 @@ export default function AlertTypeEditor() {
                       <td>
                         <input type="text" value={v.name} placeholder="varName"
                           onChange={e => updateVar(i, 'name', e.target.value)} />
+                      </td>
+                      <td>
+                        <select value={v.type} onChange={e => updateVar(i, 'type', e.target.value)}>
+                          {VAR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
                       </td>
                       <td>
                         <input type="text" value={v.description} placeholder="what this var means"
@@ -220,7 +244,6 @@ export default function AlertTypeEditor() {
               </table>
             </div>
 
-            {/* Labels */}
             <div className="form-card">
               <div className="form-card-title">Labels (optional)</div>
               <KVEditor rows={form.labels}
@@ -228,11 +251,10 @@ export default function AlertTypeEditor() {
                 keyPlaceholder="label key" valuePlaceholder="value" />
             </div>
 
-            {/* Preview */}
             <div className="form-card">
               <div className="form-card-title">Expr Preview</div>
               <p className="text-muted" style={{ marginBottom: 8 }}>
-                Var names shown as placeholders (actual values filled by Alert Suite).
+                Var names shown as placeholders (actual values filled by Alert Group).
               </p>
               <div className="preview-box">
                 {preview || <span style={{ color: '#475569' }}>Enter expr and declare vars above</span>}

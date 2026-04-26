@@ -17,7 +17,7 @@ const emptyReceiver = () => ({
   slack_configs:     [],
   pagerduty_configs: [],
 })
-const emptyForm = () => ({ receivers: [emptyReceiver()] })
+const emptyForm = () => ({ templateName: '', receivers: [emptyReceiver()] })
 
 // ── Config section component ───────────────────────────────────────────────────
 function ConfigSection({ title, icon, rows, onAdd, onRemove, onUpdate, children }) {
@@ -74,6 +74,7 @@ export default function ReceiversEditor() {
     if (!data) return
     const parsed = data.parsed?.receivers || []
     setForm({
+      templateName: name,
       receivers: parsed.map(r => ({
         name:              r.name              || '',
         webhook_configs:   (r.webhook_configs   || []).map(c => ({ url: c.url || '', send_resolved: c.send_resolved !== false })),
@@ -144,7 +145,7 @@ export default function ReceiversEditor() {
 
   async function handleSave(version) {
     setModal(null)
-    const name = selected?.name || `receivers-${Date.now()}`
+    const name = form.templateName.trim() || selected?.name || `receivers-${Date.now()}`
     await saveTemplate(TYPE, name, version, buildPayload())
     await load()
     setSelected({ name, version })
@@ -204,8 +205,16 @@ export default function ReceiversEditor() {
                 {status && <span className="tag">{status}</span>}
                 <button className="btn btn-secondary btn-sm" onClick={addReceiver}>+ Add Receiver</button>
               </div>
+              <div className="form-row" style={{ marginBottom: 10 }}>
+                <label>Template Name *</label>
+                <input type="text" value={form.templateName}
+                  placeholder="e.g. mysql-receivers"
+                  readOnly={!isNew && !!selected}
+                  style={!isNew && selected ? { background: '#f9fafb', color: '#6b7280' } : {}}
+                  onChange={e => setForm(f => ({ ...f, templateName: e.target.value }))} />
+              </div>
               <p className="text-muted">
-                Follows Alertmanager receivers format. Each receiver supports multiple config entries per type.
+                Follows Alertmanager receivers format. Receiver names will get product prefix when rendered.
               </p>
             </div>
 

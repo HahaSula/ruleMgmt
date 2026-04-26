@@ -13,6 +13,7 @@ app.use(express.json())
 const REPO_ROOT = __dirname
 const TEMPLATES_DIR = path.join(REPO_ROOT, 'templates')
 const GITOPS_DIR = path.join(REPO_ROOT, 'gitops-deploy')
+const DEFAULTS_FILE = path.join(REPO_ROOT, 'config', 'defaults.yaml')
 
 async function ensureDir(dir) {
   await fs.mkdir(dir, { recursive: true })
@@ -55,12 +56,12 @@ const HELM_TEMPLATES = {
   'alert-suite': `apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: {{ .Values.alertSuite.name }}
+  name: {{ if .Values.global.product }}{{ .Values.global.product }}-{{ end }}{{ .Values.alertSuite.name }}
   labels:
     app.kubernetes.io/managed-by: Helm
 spec:
   groups:
-    - name: {{ .Values.alertSuite.name }}
+    - name: {{ if .Values.global.product }}{{ .Values.global.product }}-{{ end }}{{ .Values.alertSuite.name }}
       rules:
         {{- range .Values.alertSuite.rules }}
         - alert: {{ .ruleName }}
@@ -85,7 +86,7 @@ spec:
   'system': `apiVersion: monitoring.coreos.com/v1alpha1
 kind: AlertmanagerConfig
 metadata:
-  name: {{ .Values.system.alertSuiteName }}
+  name: {{ if .Values.global.product }}{{ .Values.global.product }}-{{ end }}{{ .Values.system.name | default .Values.system.alertSuite }}
   labels:
     app.kubernetes.io/managed-by: Helm
 spec:
@@ -96,13 +97,13 @@ spec:
     groupInterval: 5m
     repeatInterval: 12h
     {{- if .Values.system.routes }}
-    receiver: {{ (index .Values.system.routes 0).receiver | quote }}
+    receiver: {{ if .Values.global.product }}"{{ .Values.global.product }}-{{ (index .Values.system.routes 0).receiver }}"{{ else }}{{ (index .Values.system.routes 0).receiver | quote }}{{ end }}
     routes:
       {{- range .Values.system.routes }}
       - matchers:
           - name: severity
             value: {{ .severity | quote }}
-        receiver: {{ .receiver | quote }}
+        receiver: {{ if $.Values.global.product }}"{{ $.Values.global.product }}-{{ .receiver }}"{{ else }}{{ .receiver | quote }}{{ end }}
       {{- end }}
     {{- else }}
     receiver: "default"
@@ -111,7 +112,7 @@ spec:
   receivers:
     {{- if .Values.receivers }}
     {{- range .Values.receivers }}
-    - name: {{ .name | quote }}
+    - name: {{ if $.Values.global.product }}"{{ $.Values.global.product }}-{{ .name }}"{{ else }}{{ .name | quote }}{{ end }}
       {{- if .webhook_configs }}
       webhookConfigs:
         {{- range .webhook_configs }}
@@ -354,6 +355,23 @@ app.delete('/api/gitops/:product/:site/:relunit/:stage', async (req, res) => {
   res.json({ ok: true })
 })
 
+// ─── Defaults (config/defaults.yaml) ─────────────────────────────────────────
+
+app.get('/api/defaults', async (req, res) => {
+  try {
+    const content = await fs.readFile(DEFAULTS_FILE, 'utf-8')
+    res.json({ parsed: yaml.load(content) })
+  } catch {
+    res.json({ parsed: {} })
+  }
+})
+
+app.post('/api/defaults', async (req, res) => {
+  const content = yaml.dump(req.body.data, { lineWidth: -1 })
+  await fs.writeFile(DEFAULTS_FILE, content, 'utf-8')
+  res.json({ ok: true })
+})
+
 // ─── System chart metadata (name from Chart.yaml) ────────────────────────────
 
 app.get('/api/templates/system/:name/:version/chartmeta', async (req, res) => {
@@ -417,9 +435,18 @@ app.post('/api/helm/render/:product/:site/:relunit/:stage', async (req, res) => 
     const out2 = await runCmd(helm, ['dependency', 'update'], stageDir)
     log.push(out2.trim())
 
-    // Step 3: helm template
-    log.push(`→ helm template ${releaseName} .`)
-    const out3 = await runCmd(helm, ['template', releaseName, '.'], stageDir)
+    // Read product prefix from defaults.yaml
+    let alertProduct = ''
+    try {
+      const defRaw = await fs.readFile(DEFAULTS_FILE, 'utf-8')
+      alertProduct = yaml.load(defRaw)?.product || ''
+    } catch { /* no defaults */ }
+
+    // Step 3: helm template (with optional product prefix)
+    const helmArgs = ['template', releaseName, '.']
+    if (alertProduct) helmArgs.push('--set', `global.product=${alertProduct}`)
+    log.push(`→ helm template ${releaseName} .${alertProduct ? ` (product: ${alertProduct})` : ''}`)
+    const out3 = await runCmd(helm, helmArgs, stageDir)
     log.push(out3)
 
     res.json({ ok: true, output: log.join('\n') })

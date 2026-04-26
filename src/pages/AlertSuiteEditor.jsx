@@ -1,17 +1,117 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import KVEditor from '../components/KVEditor'
 import VersionModal from '../components/VersionModal'
 import { listTemplates, getTemplate, saveTemplate, deleteTemplate } from '../utils/api'
 import { kvArrayToObject, objectToKvArray, bumpPatch, latestVersion } from '../utils/templateUtils'
 
 const TYPE = 'alert-suite'
-const SEVERITIES = ['critical', 'warning', 'info', 'none']
+const SEVERITIES  = ['critical', 'warning', 'info', 'none']
+const OP_OPTIONS  = ['>', '<', '>=', '<=', '==', '!=']
+const FUNC_OPTIONS = ['rate', 'irate', 'increase', 'avg_over_time', 'max_over_time', 'min_over_time']
+
+// ── Metrics input: metric_name + label KV editor ─────────────────────────────
+
+function parseMetric(s) {
+  const m = (s || '').match(/^([^{]*)(?:\{(.*)\})?$/)
+  const name = m?.[1]?.trim() || ''
+  const labelsStr = m?.[2]?.trim() || ''
+  const labels = labelsStr
+    ? labelsStr.split(',').map(pair => {
+        const eq = pair.indexOf('=')
+        if (eq === -1) return { key: pair.trim(), value: '' }
+        return { key: pair.slice(0, eq).trim(), value: pair.slice(eq + 1).replace(/^["']|["']$/g, '').trim() }
+      }).filter(p => p.key)
+    : []
+  return { name, labels }
+}
+
+function buildMetric(name, labels) {
+  const valid = labels.filter(l => (l.key || '').trim())
+  return valid.length
+    ? `${name}{${valid.map(l => `${l.key}="${l.value}"`).join(',')}}`
+    : name
+}
+
+function MetricsInput({ value, onChange }) {
+  const parsed = parseMetric(value)
+  const [internalName, setInternalName] = useState(parsed.name)
+  const [internalLabels, setInternalLabels] = useState(parsed.labels)
+  const lastCommit = useRef(value)
+
+  useEffect(() => {
+    if (value !== lastCommit.current) {
+      const p = parseMetric(value)
+      setInternalName(p.name)
+      setInternalLabels(p.labels)
+      lastCommit.current = value
+    }
+  }, [value])
+
+  function commit(n, lbls) {
+    const newValue = buildMetric(n, lbls)
+    lastCommit.current = newValue
+    onChange(newValue)
+  }
+
+  return (
+    <div>
+      <input type="text" value={internalName} placeholder="metric_name"
+        style={{ marginBottom: 4 }}
+        onChange={e => { setInternalName(e.target.value); commit(e.target.value, internalLabels) }} />
+      <KVEditor
+        rows={internalLabels}
+        onChange={rows => { setInternalLabels(rows); commit(internalName, rows) }}
+        keyPlaceholder="label" valuePlaceholder="value"
+      />
+    </div>
+  )
+}
+
+// ── Type-aware var value input ────────────────────────────────────────────────
+
+function VarInput({ type, value, onChange }) {
+  if (type === 'op') {
+    return (
+      <select value={value} onChange={e => onChange(e.target.value)} style={{ width: '100%' }}>
+        <option value="">— select —</option>
+        {OP_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    )
+  }
+  if (type === 'func') {
+    return (
+      <select value={value} onChange={e => onChange(e.target.value)} style={{ width: '100%' }}>
+        <option value="">— select —</option>
+        {FUNC_OPTIONS.map(f => <option key={f} value={f}>{f}</option>)}
+      </select>
+    )
+  }
+  if (type === 'int') {
+    return (
+      <input type="number" value={value} onChange={e => onChange(e.target.value)}
+        style={{ width: '100%' }} />
+    )
+  }
+  if (type === 'metrics') {
+    return <MetricsInput value={value} onChange={onChange} />
+  }
+  // string, time, default: auto-expanding textarea
+  return (
+    <textarea value={value} placeholder={type === 'time' ? 'e.g. 5m' : 'fill value'}
+      rows={1}
+      style={{ resize: 'none', overflowY: 'hidden', width: '100%', minHeight: 'unset', fontFamily: 'inherit' }}
+      onInput={e => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px' }}
+      onChange={e => onChange(e.target.value)} />
+  )
+}
+
+// ── State factories ───────────────────────────────────────────────────────────
 
 const emptyRule = () => ({
   alertTypeName: '',
   alertTypeVersion: '',
   ruleName: '',
-  vars: [],        // [{ key, value }] — filled values for alert type's declared vars
+  vars: [],        // [{ key, value, type }]
   for: '',
   description: '',
   labels: [],
@@ -21,7 +121,7 @@ const emptyRule = () => ({
 const emptyInhibit = () => ({ sourceRule: '', targetRule: '' })
 
 const emptyForm = () => ({
-  suiteName: '',
+  groupName: '',
   groupLabel: '',
   rules: [],
   inhibit: [],
@@ -29,14 +129,14 @@ const emptyForm = () => ({
 
 export default function AlertSuiteEditor() {
   const [templates, setTemplates]   = useState({})
-  const [alertTypes, setAlertTypes] = useState({})   // { name: [version] }
+  const [alertTypes, setAlertTypes] = useState({})
   const [selected, setSelected]     = useState(null)
   const [form, setForm]             = useState(emptyForm())
   const [isNew, setIsNew]           = useState(false)
   const [modal, setModal]           = useState(null)
   const [status, setStatus]         = useState('')
 
-  // Cache of alert type var declarations: { "name@version": [{name, description}] }
+  // Cache of alert type var declarations: { "name@version": [{name, description, type}] }
   const [varDeclCache, setVarDeclCache] = useState({})
 
   const load = useCallback(async () => {
@@ -63,11 +163,10 @@ export default function AlertSuiteEditor() {
 
     const rules = await Promise.all((s.rules || []).map(async r => {
       const decls = await loadVarDecls(r.alertTypeName, r.alertTypeVersion)
-      // Merge declared var names with any saved values
       const savedVars = r.vars || {}
       const vars = decls.length
-        ? decls.map(d => ({ key: d.name, value: String(savedVars[d.name] ?? '') }))
-        : objectToKvArray(savedVars)
+        ? decls.map(d => ({ key: d.name, value: String(savedVars[d.name] ?? ''), type: d.type || 'string' }))
+        : objectToKvArray(savedVars).map(v => ({ ...v, type: 'string' }))
       return {
         alertTypeName:    r.alertTypeName    || '',
         alertTypeVersion: r.alertTypeVersion || '',
@@ -81,7 +180,7 @@ export default function AlertSuiteEditor() {
     }))
 
     setForm({
-      suiteName:  s.name       || name,
+      groupName:  s.name       || name,
       groupLabel: s.groupLabel || '',
       rules,
       inhibit: (s.inhibit || []).map(i => ({ sourceRule: i.sourceRule || '', targetRule: i.targetRule || '' })),
@@ -96,14 +195,8 @@ export default function AlertSuiteEditor() {
     setIsNew(true)
   }
 
-  // When alertTypeName or alertTypeVersion changes for a rule, auto-populate vars
   async function handleRuleTypeChange(i, field, val) {
-    setForm(f => {
-      const rules = f.rules.map((r, idx) => idx === i ? { ...r, [field]: val } : r)
-      return { ...f, rules }
-    })
-
-    // Reload var decls if both name and version are set
+    setForm(f => ({ ...f, rules: f.rules.map((r, idx) => idx === i ? { ...r, [field]: val } : r) }))
     const rule = { ...form.rules[i], [field]: val }
     if (rule.alertTypeName && rule.alertTypeVersion) {
       const decls = await loadVarDecls(rule.alertTypeName, rule.alertTypeVersion)
@@ -112,7 +205,11 @@ export default function AlertSuiteEditor() {
         rules: f.rules.map((r, idx) => {
           if (idx !== i) return r
           const existing = kvArrayToObject(r.vars)
-          const vars = decls.map(d => ({ key: d.name, value: String(existing[d.name] ?? '') }))
+          const vars = decls.map(d => ({
+            key:   d.name,
+            value: String(existing[d.name] ?? ''),
+            type:  d.type || 'string',
+          }))
           return { ...r, [field]: val, vars }
         })
       }))
@@ -122,22 +219,21 @@ export default function AlertSuiteEditor() {
   function updateRule(i, field, val) {
     setForm(f => ({ ...f, rules: f.rules.map((r, idx) => idx === i ? { ...r, [field]: val } : r) }))
   }
-  function addRule() { setForm(f => ({ ...f, rules: [...f.rules, emptyRule()] })) }
-  function removeRule(i) { setForm(f => ({ ...f, rules: f.rules.filter((_, idx) => idx !== i) })) }
+  function addRule()    { setForm(f => ({ ...f, rules: [...f.rules, emptyRule()] })) }
+  function removeRule(i){ setForm(f => ({ ...f, rules: f.rules.filter((_, idx) => idx !== i) })) }
 
   function updateInhibit(i, field, val) {
     setForm(f => ({ ...f, inhibit: f.inhibit.map((r, idx) => idx === i ? { ...r, [field]: val } : r) }))
   }
-  function addInhibit() { setForm(f => ({ ...f, inhibit: [...f.inhibit, emptyInhibit()] })) }
-  function removeInhibit(i) { setForm(f => ({ ...f, inhibit: f.inhibit.filter((_, idx) => idx !== i) })) }
+  function addInhibit()    { setForm(f => ({ ...f, inhibit: [...f.inhibit, emptyInhibit()] })) }
+  function removeInhibit(i){ setForm(f => ({ ...f, inhibit: f.inhibit.filter((_, idx) => idx !== i) })) }
 
-  // ruleName list for inhibit dropdowns
   const ruleNames = form.rules.map(r => r.ruleName).filter(Boolean)
 
   function buildPayload() {
     return {
       alertSuite: {
-        name: form.suiteName,
+        name:       form.groupName,
         groupLabel: form.groupLabel,
         rules: form.rules.map(r => {
           const obj = {
@@ -147,8 +243,8 @@ export default function AlertSuiteEditor() {
             vars:             kvArrayToObject(r.vars),
             severity:         r.severity,
           }
-          if (r.for)          obj.for = r.for
-          if (r.description)  obj.description = r.description
+          if (r.for)         obj.for = r.for
+          if (r.description) obj.description = r.description
           const labels = kvArrayToObject(r.labels)
           if (Object.keys(labels).length) obj.labels = labels
           return obj
@@ -160,7 +256,7 @@ export default function AlertSuiteEditor() {
 
   async function handleSave(version) {
     setModal(null)
-    const name = selected?.name || form.suiteName || `suite-${Date.now()}`
+    const name = selected?.name || form.groupName || `group-${Date.now()}`
     await saveTemplate(TYPE, name, version, buildPayload())
     await load()
     setSelected({ name, version })
@@ -170,7 +266,7 @@ export default function AlertSuiteEditor() {
   }
 
   function openSaveModal() {
-    const n = selected?.name || form.suiteName
+    const n = selected?.name || form.groupName
     const v = selected
       ? bumpPatch(selected.version)
       : (n && templates[n] ? bumpPatch(latestVersion(templates[n])) : 'v1.0.0')
@@ -186,15 +282,14 @@ export default function AlertSuiteEditor() {
 
   return (
     <div className="editor-layout">
-      {/* ── Left list ── */}
       <div className="editor-list">
         <div className="editor-list-header">
-          Alert Suites
+          Alert Groups
           <button className="btn btn-primary btn-sm" onClick={startNew}>+ New</button>
         </div>
         <div className="editor-list-body">
           {Object.keys(templates).length === 0 && (
-            <div style={{ padding: '20px 14px', color: '#9ca3af', fontSize: 13 }}>No suites yet.</div>
+            <div style={{ padding: '20px 14px', color: '#9ca3af', fontSize: 13 }}>No groups yet.</div>
           )}
           {Object.entries(templates).map(([name, versions]) => (
             <div key={name} className="template-group">
@@ -212,25 +307,24 @@ export default function AlertSuiteEditor() {
         </div>
       </div>
 
-      {/* ── Right form ── */}
       <div className="editor-form">
         {!isNew && !selected ? (
           <div className="empty-state">
             <div className="empty-state-icon">📦</div>
-            <p>Select a suite or click + New.</p>
+            <p>Select an alert group or click + New.</p>
           </div>
         ) : (
           <>
             <div className="form-card">
               <div className="form-card-title">
-                {selected ? `${selected.name} @ ${selected.version}` : 'New Alert Suite'}
+                {selected ? `${selected.name} @ ${selected.version}` : 'New Alert Group'}
                 {status && <span className="tag">{status}</span>}
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div className="form-row">
-                  <label>Suite Name *</label>
-                  <input type="text" value={form.suiteName} placeholder="e.g. platform-suite"
-                    onChange={e => setForm(f => ({ ...f, suiteName: e.target.value }))} />
+                  <label>Group Name *</label>
+                  <input type="text" value={form.groupName} placeholder="e.g. platform-group"
+                    onChange={e => setForm(f => ({ ...f, groupName: e.target.value }))} />
                 </div>
                 <div className="form-row">
                   <label>Group Label</label>
@@ -240,7 +334,6 @@ export default function AlertSuiteEditor() {
               </div>
             </div>
 
-            {/* Rules */}
             <div className="form-card">
               <div className="form-card-title">
                 Rules
@@ -282,17 +375,17 @@ export default function AlertSuiteEditor() {
                       </div>
                     </div>
 
-                    {/* Var values — auto-populated from alert type declarations */}
                     {rule.vars.length > 0 && (
                       <div className="form-row">
                         <label>Var Values</label>
                         <table className="kv-table" style={{ width: '100%', tableLayout: 'fixed' }}>
                           <colgroup>
-                            <col style={{ width: '35%' }} />
-                            <col style={{ width: '65%' }} />
+                            <col style={{ width: '30%' }} />
+                            <col style={{ width: '15%' }} />
+                            <col />
                           </colgroup>
                           <thead>
-                            <tr><th>var name</th><th>value</th></tr>
+                            <tr><th>var name</th><th>type</th><th>value</th></tr>
                           </thead>
                           <tbody>
                             {rule.vars.map((v, vi) => (
@@ -302,23 +395,28 @@ export default function AlertSuiteEditor() {
                                     style={{ background: '#f9fafb', color: '#6b7280' }} />
                                 </td>
                                 <td>
-                                  <textarea value={v.value} placeholder="fill value"
-                                    rows={1}
-                                    style={{ resize: 'none', overflowY: 'hidden', width: '100%', minHeight: 'unset', fontFamily: 'inherit' }}
-                                    onInput={e => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px' }}
-                                    onChange={e => {
+                                  <span style={{
+                                    fontSize: 11, background: '#e0e7ff', color: '#4338ca',
+                                    padding: '2px 6px', borderRadius: 4, display: 'inline-block'
+                                  }}>
+                                    {v.type || 'string'}
+                                  </span>
+                                </td>
+                                <td>
+                                  <VarInput
+                                    type={v.type || 'string'}
+                                    value={v.value}
+                                    onChange={val => {
                                       const vars = rule.vars.map((vv, vvi) =>
-                                        vvi === vi ? { ...vv, value: e.target.value } : vv)
+                                        vvi === vi ? { ...vv, value: val } : vv)
                                       updateRule(i, 'vars', vars)
-                                    }} />
+                                    }}
+                                  />
                                 </td>
                               </tr>
                             ))}
                           </tbody>
                         </table>
-                        {!rule.alertTypeName && (
-                          <span className="text-muted">Select an Alert Type to auto-populate var fields.</span>
-                        )}
                       </div>
                     )}
                     {rule.vars.length === 0 && rule.alertTypeName && rule.alertTypeVersion && (
@@ -358,14 +456,13 @@ export default function AlertSuiteEditor() {
               })}
             </div>
 
-            {/* Inhibit */}
             <div className="form-card">
               <div className="form-card-title">
                 Inhibit Rules
                 <button className="btn btn-secondary btn-sm" onClick={addInhibit}>+ Add</button>
               </div>
               <p className="text-muted" style={{ marginBottom: 8 }}>
-                Source rule suppresses target rule. Picks from ruleName values defined above.
+                Source rule suppresses target rule.
               </p>
               {form.inhibit.length === 0 && <p className="text-muted">No inhibit rules.</p>}
               {form.inhibit.map((inh, i) => (
