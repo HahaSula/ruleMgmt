@@ -1,8 +1,70 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import KVEditor from '../components/KVEditor'
 import VersionModal from '../components/VersionModal'
 import { listTemplates, getTemplate, saveTemplate, deleteTemplate } from '../utils/api'
 import { kvArrayToObject, objectToKvArray, bumpPatch, latestVersion } from '../utils/templateUtils'
+
+// ── YAML preview builder ──────────────────────────────────────────────────────
+
+function buildRuleGroupPreview(form, product) {
+  const pfx = product ? `${product}-` : ''
+  const groupName = form.groupName || 'unnamed-group'
+
+  let yaml = `apiVersion: monitoring.coreos.com/v1\nkind: PrometheusRule\nmetadata:\n`
+  yaml += `  name: ${pfx}${groupName}\n`
+  yaml += `  labels:\n    app.kubernetes.io/managed-by: Helm\nspec:\n  groups:\n`
+  yaml += `    - name: ${pfx}${groupName}\n`
+
+  const glabels = (form.groupLabels || []).filter(l => l.key.trim())
+  if (glabels.length) {
+    yaml += `      labels:\n`
+    for (const { key, value } of glabels) yaml += `        ${key}: ${JSON.stringify(value)}\n`
+  }
+
+  if (form.rules.length === 0) {
+    yaml += `      rules: []\n`
+    return yaml.trimEnd()
+  }
+
+  yaml += `      rules:\n`
+  for (const rule of form.rules) {
+    const rn = rule.ruleName || 'unnamed-alert'
+    yaml += `        - alert: ${pfx}${rn}\n`
+    if (rule.alertTypeName) {
+      yaml += `          # type: ${rule.alertTypeName}`
+      if (rule.alertTypeVersion) yaml += `@${rule.alertTypeVersion}`
+      yaml += `\n`
+    }
+    const filledVars = (rule.vars || []).filter(v => v.key && v.value)
+    if (filledVars.length) {
+      yaml += `          expr: |\n`
+      yaml += `            # rendered by Helm from ${rule.alertTypeName || 'alert-type'}\n`
+      for (const v of filledVars) yaml += `            # ${v.key}: ${v.value}\n`
+    } else {
+      yaml += `          expr: "# select alert type + fill vars"\n`
+    }
+    if (rule.for) yaml += `          for: ${rule.for}\n`
+    yaml += `          labels:\n`
+    yaml += `            severity: ${rule.severity || 'warning'}\n`
+    for (const { key, value } of (rule.labels || []).filter(l => l.key.trim())) {
+      yaml += `            ${key}: ${JSON.stringify(value)}\n`
+    }
+    if (rule.description) {
+      yaml += `          annotations:\n`
+      yaml += `            description: ${JSON.stringify(rule.description)}\n`
+    }
+  }
+
+  if ((form.inhibit || []).some(i => i.sourceRule && i.targetRule)) {
+    yaml += `\n      # inhibit rules (in AlertmanagerConfig, not PrometheusRule)\n`
+    for (const inh of form.inhibit) {
+      if (inh.sourceRule && inh.targetRule)
+        yaml += `      # ${inh.sourceRule} suppresses ${inh.targetRule}\n`
+    }
+  }
+
+  return yaml.trimEnd()
+}
 
 const TYPE = 'alert-suite'
 const SEVERITIES  = ['critical', 'warning', 'info', 'none']
@@ -135,6 +197,8 @@ export default function AlertSuiteEditor() {
   const [isNew, setIsNew]           = useState(false)
   const [modal, setModal]           = useState(null)
   const [status, setStatus]         = useState('')
+  const [product, setProduct]       = useState('')
+  const [showPreview, setShowPreview] = useState(false)
 
   // Cache of alert type var declarations: { "name@version": [{name, description, type}] }
   const [varDeclCache, setVarDeclCache] = useState({})
@@ -143,6 +207,11 @@ export default function AlertSuiteEditor() {
     const [suites, at] = await Promise.all([listTemplates(TYPE), listTemplates('alert-type')])
     setTemplates(suites)
     setAlertTypes(at)
+    try {
+      const r = await fetch('/api/defaults')
+      const d = await r.json()
+      setProduct(d.parsed?.product || '')
+    } catch {}
   }, [])
   useEffect(() => { load() }, [load])
 
@@ -282,6 +351,8 @@ export default function AlertSuiteEditor() {
     setModal(v)
   }
 
+  const preview = useMemo(() => buildRuleGroupPreview(form, product), [form, product])
+
   async function handleDelete() {
     if (!selected || !confirm(`Delete ${selected.name} @ ${selected.version}?`)) return
     await deleteTemplate(TYPE, selected.name, selected.version)
@@ -316,18 +387,27 @@ export default function AlertSuiteEditor() {
         </div>
       </div>
 
-      <div className="editor-form">
+      <div className="editor-form" style={showPreview && (isNew || selected) ? { display: 'flex', gap: 0, padding: 0, overflow: 'hidden' } : {}}>
         {!isNew && !selected ? (
           <div className="empty-state">
             <div className="empty-state-icon">📦</div>
             <p>Select a rule group or click + New.</p>
           </div>
         ) : (
-          <>
+          <div style={showPreview ? { display: 'flex', width: '100%', height: '100%', overflow: 'hidden' } : {}}>
+          <div style={showPreview ? { flex: 1, overflowY: 'auto', padding: 24, minWidth: 0 } : {}}>
             <div className="form-card">
               <div className="form-card-title">
-                {selected ? `${selected.name} @ ${selected.version}` : 'New Rule Group'}
-                {status && <span className="tag">{status}</span>}
+                <span>
+                  {selected ? `${selected.name} @ ${selected.version}` : 'New Rule Group'}
+                  {status && <span className="tag">{status}</span>}
+                </span>
+                <button
+                  className={`btn btn-sm ${showPreview ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => setShowPreview(v => !v)}
+                >
+                  {showPreview ? 'Hide Preview' : 'Show Preview'}
+                </button>
               </div>
               <div className="form-row" style={{ marginBottom: 10 }}>
                 <label>Group Name *</label>
@@ -508,7 +588,32 @@ export default function AlertSuiteEditor() {
                 <button className="btn btn-danger" onClick={handleDelete}>Delete this version</button>
               )}
             </div>
-          </>
+          </div>
+          {showPreview && (
+            <div style={{
+              width: 400, minWidth: 320, borderLeft: '1px solid #e5e7eb',
+              display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            }}>
+              <div style={{
+                padding: '10px 16px', borderBottom: '1px solid #e5e7eb',
+                fontSize: 12, fontWeight: 600, color: '#6b7280',
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              }}>
+                YAML Preview
+                {product && <span style={{ fontSize: 11, color: '#9ca3af' }}>product: {product}</span>}
+              </div>
+              <pre style={{
+                flex: 1, overflowY: 'auto', margin: 0,
+                padding: '14px 16px', fontSize: 11.5,
+                fontFamily: "'Fira Code', 'Cascadia Code', monospace",
+                background: '#0f172a', color: '#7dd3fc', lineHeight: 1.7,
+                whiteSpace: 'pre', overflowX: 'auto',
+              }}>
+                {preview}
+              </pre>
+            </div>
+          )}
+          </div>
         )}
       </div>
 

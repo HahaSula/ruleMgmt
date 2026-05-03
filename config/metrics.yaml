@@ -1,0 +1,64 @@
+metrics:
+  - name: http_requests_total
+    description: Total HTTP requests
+    labels:
+      - name: job
+        values:
+          - api
+          - web
+          - worker
+      - name: method
+        values:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+      - name: status
+        values:
+          - '200'
+          - '201'
+          - '400'
+          - '404'
+          - '500'
+          - '502'
+          - '503'
+      - name: instance
+        values: []
+  - name: node_cpu_seconds_total
+    description: CPU time in seconds by mode
+    labels:
+      - name: mode
+        values:
+          - user
+          - system
+          - idle
+          - iowait
+          - irq
+          - softirq
+      - name: cpu
+        values: []
+      - name: instance
+        values: []
+  - name: node_memory_MemAvailable_bytes
+    description: Available memory in bytes
+    labels:
+      - name: instance
+        values: []
+  - name: container_cpu_usage_seconds_total
+    description: Container CPU usage
+    labels:
+      - name: namespace
+        values: []
+      - name: pod
+        values: []
+      - name: container
+        values: []
+  - name: container_memory_usage_bytes
+    description: Container memory usage
+    labels:
+      - name: namespace
+        values: []
+      - name: pod
+        values: []
+      - name: container
+        values: []
