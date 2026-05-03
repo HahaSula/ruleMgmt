@@ -133,6 +133,22 @@ export async function saveDefaults(data) {
   return res.json()
 }
 
+// ─── Metrics dictionary ───────────────────────────────────────────────────────
+
+export async function getMetricsDict() {
+  const res = await fetch(`${BASE}/metrics-dict`)
+  return res.json()
+}
+
+export async function saveMetricsDict(metrics) {
+  const res = await fetch(`${BASE}/metrics-dict`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ metrics }),
+  })
+  return res.json()
+}
+
 // ─── Helm render ──────────────────────────────────────────────────────────────
 
 export async function runHelmRender(product, site, relunit, stage) {

@@ -13,7 +13,8 @@ app.use(express.json())
 const REPO_ROOT = __dirname
 const TEMPLATES_DIR = path.join(REPO_ROOT, 'templates')
 const GITOPS_DIR = path.join(REPO_ROOT, 'gitops-deploy')
-const DEFAULTS_FILE = path.join(REPO_ROOT, 'config', 'defaults.yaml')
+const DEFAULTS_FILE     = path.join(REPO_ROOT, 'config', 'defaults.yaml')
+const METRICS_DICT_FILE = path.join(REPO_ROOT, 'config', 'metrics.yaml')
 
 async function ensureDir(dir) {
   await fs.mkdir(dir, { recursive: true })
@@ -191,21 +192,24 @@ app.post('/api/templates/:type/:name/:version', async (req, res) => {
   const chartFile = path.join(dir, 'Chart.yaml')
   const semver = version.replace(/^v/, '')
   if (type === 'system') {
-    const suiteName = req.body.data?.system?.alertSuite
-    const suiteVersion = (req.body.data?.system?.alertSuiteVersion || '').replace(/^v/, '')
-    const chart = {
-      apiVersion: 'v2',
-      name,
-      version: semver,
-      type: 'application',
+    const ruleGroups = req.body.data?.system?.ruleGroups || []
+    // backward compat: single alertSuite field
+    const legacyName = req.body.data?.system?.alertSuite
+    const legacyVer  = (req.body.data?.system?.alertSuiteVersion || '').replace(/^v/, '')
+    const chart = { apiVersion: 'v2', name, version: semver, type: 'application' }
+    let deps = []
+    if (ruleGroups.length > 0) {
+      deps = ruleGroups
+        .filter(rg => rg.name && rg.version)
+        .map(rg => ({
+          name:       rg.name,
+          version:    rg.version.replace(/^v/, ''),
+          repository: `file://../../../alert-suite/${rg.name}/v${rg.version.replace(/^v/, '')}`,
+        }))
+    } else if (legacyName && legacyVer) {
+      deps = [{ name: legacyName, version: legacyVer, repository: `file://../../../alert-suite/${legacyName}/v${legacyVer}` }]
     }
-    if (suiteName && suiteVersion) {
-      chart.dependencies = [{
-        name: suiteName,
-        version: suiteVersion,
-        repository: `file://../../../alert-suite/${suiteName}/v${suiteVersion}`,
-      }]
-    }
+    if (deps.length) chart.dependencies = deps
     await fs.writeFile(chartFile, yaml.dump(chart, { lineWidth: -1 }), 'utf-8')
   } else {
     try {
@@ -370,6 +374,26 @@ app.post('/api/defaults', async (req, res) => {
   const content = yaml.dump(req.body.data, { lineWidth: -1 })
   await fs.writeFile(DEFAULTS_FILE, content, 'utf-8')
   res.json({ ok: true })
+})
+
+// ─── Metrics dictionary (config/metrics.yaml) ────────────────────────────────
+
+app.get('/api/metrics-dict', async (req, res) => {
+  try {
+    const raw = await fs.readFile(METRICS_DICT_FILE, 'utf-8')
+    res.json({ metrics: yaml.load(raw)?.metrics || [] })
+  } catch {
+    res.json({ metrics: [] })
+  }
+})
+
+app.post('/api/metrics-dict', async (req, res) => {
+  try {
+    await fs.writeFile(METRICS_DICT_FILE, yaml.dump({ metrics: req.body.metrics }, { lineWidth: -1 }), 'utf-8')
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
 })
 
 // ─── System chart metadata (name from Chart.yaml) ────────────────────────────

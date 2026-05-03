@@ -121,8 +121,8 @@ const emptyRule = () => ({
 const emptyInhibit = () => ({ sourceRule: '', targetRule: '' })
 
 const emptyForm = () => ({
-  groupName: '',
-  groupLabel: '',
+  groupName:   '',
+  groupLabels: [],   // [{key, value}]
   rules: [],
   inhibit: [],
 })
@@ -179,9 +179,18 @@ export default function AlertSuiteEditor() {
       }
     }))
 
+    // migrate old string groupLabel → [{key,value}]
+    let groupLabels = []
+    if (s.groupLabels && typeof s.groupLabels === 'object') {
+      groupLabels = objectToKvArray(s.groupLabels)
+    } else if (typeof s.groupLabel === 'string' && s.groupLabel.includes(':')) {
+      const [k, ...rest] = s.groupLabel.split(':')
+      groupLabels = [{ key: k.trim(), value: rest.join(':').trim() }]
+    }
+
     setForm({
-      groupName:  s.name       || name,
-      groupLabel: s.groupLabel || '',
+      groupName:   s.name || name,
+      groupLabels,
       rules,
       inhibit: (s.inhibit || []).map(i => ({ sourceRule: i.sourceRule || '', targetRule: i.targetRule || '' })),
     })
@@ -233,8 +242,8 @@ export default function AlertSuiteEditor() {
   function buildPayload() {
     return {
       alertSuite: {
-        name:       form.groupName,
-        groupLabel: form.groupLabel,
+        name:        form.groupName,
+        groupLabels: kvArrayToObject(form.groupLabels),
         rules: form.rules.map(r => {
           const obj = {
             alertTypeName:    r.alertTypeName,
@@ -284,7 +293,7 @@ export default function AlertSuiteEditor() {
     <div className="editor-layout">
       <div className="editor-list">
         <div className="editor-list-header">
-          Alert Groups
+          Rule Groups
           <button className="btn btn-primary btn-sm" onClick={startNew}>+ New</button>
         </div>
         <div className="editor-list-body">
@@ -311,26 +320,31 @@ export default function AlertSuiteEditor() {
         {!isNew && !selected ? (
           <div className="empty-state">
             <div className="empty-state-icon">📦</div>
-            <p>Select an alert group or click + New.</p>
+            <p>Select a rule group or click + New.</p>
           </div>
         ) : (
           <>
             <div className="form-card">
               <div className="form-card-title">
-                {selected ? `${selected.name} @ ${selected.version}` : 'New Alert Group'}
+                {selected ? `${selected.name} @ ${selected.version}` : 'New Rule Group'}
                 {status && <span className="tag">{status}</span>}
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <div className="form-row">
-                  <label>Group Name *</label>
-                  <input type="text" value={form.groupName} placeholder="e.g. platform-group"
-                    onChange={e => setForm(f => ({ ...f, groupName: e.target.value }))} />
-                </div>
-                <div className="form-row">
-                  <label>Group Label</label>
-                  <input type="text" value={form.groupLabel} placeholder="e.g. team: platform"
-                    onChange={e => setForm(f => ({ ...f, groupLabel: e.target.value }))} />
-                </div>
+              <div className="form-row" style={{ marginBottom: 10 }}>
+                <label>Group Name *</label>
+                <input type="text" value={form.groupName} placeholder="e.g. platform-group"
+                  onChange={e => setForm(f => ({ ...f, groupName: e.target.value }))} />
+              </div>
+              <div className="form-row">
+                <label>Group Labels
+                  <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 400, marginLeft: 6 }}>
+                    added to every rule in this group on render
+                  </span>
+                </label>
+                <KVEditor
+                  rows={form.groupLabels}
+                  onChange={rows => setForm(f => ({ ...f, groupLabels: rows }))}
+                  keyPlaceholder="label key" valuePlaceholder="value"
+                />
               </div>
             </div>
 
