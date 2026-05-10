@@ -1,0 +1,4 @@
+apiVersion: v2
+name: error-rate
+version: 1.0.0
+type: application
