@@ -4,7 +4,7 @@ import {
   listSites, createSite, deleteSite,
   listRelunits, createRelunit, deleteRelunit,
   getStage, saveStage, deleteStage,
-  listTemplates, getSystemChartMeta, runHelmRender,
+  listTemplates, getChartMeta, runHelmRender,
   getDefaults, saveDefaults,
 } from '../utils/api'
 import KVEditor from '../components/KVEditor'
@@ -13,12 +13,12 @@ import { objectToKvArray, kvArrayToObject } from '../utils/templateUtils'
 const STAGES = ['DEV', 'TEST', 'STG', 'PROD']
 
 // Build the Chart.yaml object for a gitops stage
-function buildStageChart(relunit, stage, chartName, chartVersion, systemName, systemVersion) {
+function buildStageChart(relunit, stage, chartName, chartVersion, amconfigName, amconfigVersion) {
   // chartVersion has 'v' prefix in folder name; strip it for the Helm semver field
   const semver = chartVersion.replace(/^v/, '')
   // 5 levels up from stage folder to repo root:
   // gitops-deploy / product / site / relunit / stage  →  ../../../../../
-  const repoPath = `../../../../../templates/system/${systemName}/${systemVersion}`
+  const repoPath = `../../../../../templates/amconfig/${amconfigName}/${amconfigVersion}`
   return {
     apiVersion: 'v2',
     name: `${relunit}-${stage}`.toLowerCase(),  // Helm release names must be lowercase
@@ -47,7 +47,7 @@ export default function GitopsEditor() {
   const [sites, setSites]              = useState([])
   const [relunits, setRelunits]        = useState({})
   const [selection, setSelection]      = useState(null) // { site, relunit, stage }
-  const [systems, setSystems]          = useState({})
+  const [amconfigs, setAmconfigs]       = useState({})
 
   // Add UI state
   const [addSite, setAddSite]          = useState(false)
@@ -78,8 +78,8 @@ export default function GitopsEditor() {
   const [productPfxEditing, setProductPfxEditing] = useState(false)
 
   const loadAll = useCallback(async () => {
-    const [p, sys] = await Promise.all([getProduct(), listTemplates('system')])
-    setSystems(sys)
+    const [p, sys] = await Promise.all([getProduct(), listTemplates('amconfig')])
+    setAmconfigs(sys)
     const pname = p.name || ''
     setProductName(pname)
     setProductInput(pname)
@@ -128,7 +128,7 @@ export default function GitopsEditor() {
         setStageForm(f => ({ ...f, chartName: '', chartSemver: '' }))
         return
       }
-      const meta = await getSystemChartMeta(systemName, systemVersion)
+      const meta = await getChartMeta('amconfig', systemName, systemVersion)
       if (meta) {
         setStageForm(f => ({
           ...f,
@@ -187,14 +187,14 @@ export default function GitopsEditor() {
     const d = await getStage(product, site, relunit, stage)
     const p = d.parsed || {}
 
-    // Restore system name + version from Chart.yaml dependency repository URL
-    let systemName = ''
-    let systemVersion = ''
+    // Restore amconfig name + version from Chart.yaml dependency repository URL
+    let amconfigName = ''
+    let amconfigVersion = ''
     let chartName = ''
     const dep = d.chart?.parsed?.dependencies?.[0]
     if (dep?.repository) {
-      const m = dep.repository.match(/templates\/system\/([^/]+)\/([^/]+)$/)
-      if (m) { systemName = m[1]; systemVersion = m[2] }
+      const m = dep.repository.match(/templates\/amconfig\/([^/]+)\/([^/]+)$/)
+      if (m) { amconfigName = m[1]; amconfigVersion = m[2] }
       chartName = dep.name || ''
     }
 
@@ -206,8 +206,8 @@ export default function GitopsEditor() {
 
     setStageForm(f => ({
       ...f,
-      systemName,
-      systemVersion,
+      systemName: amconfigName,
+      systemVersion: amconfigVersion,
       chartName,
       chartSemver: dep?.version ? String(dep.version) : '',
       overrides,
@@ -269,10 +269,10 @@ export default function GitopsEditor() {
     setProductPfxEditing(false)
   }
 
-  const systemVersions = stageForm.systemName ? (systems[stageForm.systemName] || []) : []
+  const systemVersions = stageForm.systemName ? (amconfigs[stageForm.systemName] || []) : []
 
   const systemRef = stageForm.systemName && stageForm.systemVersion
-    ? `system/${stageForm.systemName}/${stageForm.systemVersion}`
+    ? `amconfig/${stageForm.systemName}/${stageForm.systemVersion}`
     : null
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -446,11 +446,11 @@ export default function GitopsEditor() {
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div className="form-row">
-                  <label>System Template</label>
+                  <label>AM Config Template</label>
                   <select value={stageForm.systemName}
                     onChange={e => setStageForm(f => ({ ...f, systemName: e.target.value, systemVersion: '', chartName: '', chartSemver: '' }))}>
-                    <option value="">— select system —</option>
-                    {Object.keys(systems).map(n => <option key={n} value={n}>{n}</option>)}
+                    <option value="">— select amconfig —</option>
+                    {Object.keys(amconfigs).map(n => <option key={n} value={n}>{n}</option>)}
                   </select>
                 </div>
                 <div className="form-row">
@@ -475,7 +475,7 @@ export default function GitopsEditor() {
                       `dependencies:`,
                       `  - name: ${stageForm.chartName}`,
                       `    version: "${stageForm.chartSemver}"`,
-                      `    repository: "file://../../../../../templates/system/${stageForm.systemName}/${stageForm.systemVersion}"`,
+                      `    repository: "file://../../../../../templates/amconfig/${stageForm.systemName}/${stageForm.systemVersion}"`,
                     ].join('\n')}
                   </div>
                 </div>

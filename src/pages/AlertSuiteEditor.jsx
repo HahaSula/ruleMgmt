@@ -1,7 +1,9 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react'
 import KVEditor from '../components/KVEditor'
 import VersionModal from '../components/VersionModal'
-import { listTemplates, getTemplate, saveTemplate, deleteTemplate } from '../utils/api'
+const PromQLEditor  = lazy(() => import('../components/PromQLEditor'))
+const PromQLBuilder = lazy(() => import('../components/PromQLBuilder'))
+import { listTemplates, getTemplate, saveTemplate, deleteTemplate, importPrometheusRules, getMetricsDict } from '../utils/api'
 import { kvArrayToObject, objectToKvArray, bumpPatch, latestVersion } from '../utils/templateUtils'
 
 // ── YAML preview builder ──────────────────────────────────────────────────────
@@ -30,18 +32,24 @@ function buildRuleGroupPreview(form, product) {
   for (const rule of form.rules) {
     const rn = rule.ruleName || 'unnamed-alert'
     yaml += `        - alert: ${pfx}${rn}\n`
-    if (rule.alertTypeName) {
+    // expr: for direct-expr use the vars field; for all others use rule.expr directly
+    const ruleExpr = rule.alertTypeName === DIRECT_EXPR_TYPE
+      ? directExprValue(rule.vars)
+      : (rule.expr || '')
+    if (rule.alertTypeName && rule.alertTypeName !== DIRECT_EXPR_TYPE) {
       yaml += `          # type: ${rule.alertTypeName}`
       if (rule.alertTypeVersion) yaml += `@${rule.alertTypeVersion}`
       yaml += `\n`
-    }
-    const filledVars = (rule.vars || []).filter(v => v.key && v.value)
-    if (filledVars.length) {
-      yaml += `          expr: |\n`
-      yaml += `            # rendered by Helm from ${rule.alertTypeName || 'alert-type'}\n`
-      for (const v of filledVars) yaml += `            # ${v.key}: ${v.value}\n`
+      const filledVars = (rule.vars || []).filter(v => v.key && v.value)
+      if (filledVars.length && !ruleExpr) {
+        yaml += `          expr: |\n`
+        yaml += `            # rendered by Helm from ${rule.alertTypeName}\n`
+        for (const v of filledVars) yaml += `            # ${v.key}: ${v.value}\n`
+      } else {
+        yaml += `          expr: ${ruleExpr ? JSON.stringify(ruleExpr) : '"# enter a PromQL expression"'}\n`
+      }
     } else {
-      yaml += `          expr: "# select alert type + fill vars"\n`
+      yaml += `          expr: ${ruleExpr ? JSON.stringify(ruleExpr) : '"# enter a PromQL expression"'}\n`
     }
     if (rule.for) yaml += `          for: ${rule.for}\n`
     yaml += `          labels:\n`
@@ -55,14 +63,6 @@ function buildRuleGroupPreview(form, product) {
     }
   }
 
-  if ((form.inhibit || []).some(i => i.sourceRule && i.targetRule)) {
-    yaml += `\n      # inhibit rules (in AlertmanagerConfig, not PrometheusRule)\n`
-    for (const inh of form.inhibit) {
-      if (inh.sourceRule && inh.targetRule)
-        yaml += `      # ${inh.sourceRule} suppresses ${inh.targetRule}\n`
-    }
-  }
-
   return yaml.trimEnd()
 }
 
@@ -71,7 +71,20 @@ const SEVERITIES  = ['critical', 'warning', 'info', 'none']
 const OP_OPTIONS  = ['>', '<', '>=', '<=', '==', '!=']
 const FUNC_OPTIONS = ['rate', 'irate', 'increase', 'avg_over_time', 'max_over_time', 'min_over_time']
 
+// ── Built-in "direct-expr" rule type ─────────────────────────────────────────
+// The expression IS the variable value: edit the full PromQL string directly.
+// alertTypeName='direct-expr', no version, single var { expr }.
+
+const DIRECT_EXPR_TYPE = 'direct-expr'
+const DIRECT_EXPR_VARS = [{ name: 'expr', type: 'string' }]
+
+function directExprValue(vars) {
+  return (vars || []).find(v => v.key === 'expr')?.value || ''
+}
+
 // ── Metrics input: metric_name + label KV editor ─────────────────────────────
+
+const LABEL_MATCHER_OPS = ['=', '!=', '=~', '!~']
 
 function parseMetric(s) {
   const m = (s || '').match(/^([^{]*)(?:\{(.*)\})?$/)
@@ -79,9 +92,12 @@ function parseMetric(s) {
   const labelsStr = m?.[2]?.trim() || ''
   const labels = labelsStr
     ? labelsStr.split(',').map(pair => {
-        const eq = pair.indexOf('=')
-        if (eq === -1) return { key: pair.trim(), value: '' }
-        return { key: pair.slice(0, eq).trim(), value: pair.slice(eq + 1).replace(/^["']|["']$/g, '').trim() }
+        const opMatch = pair.match(/(!~|=~|!=|=)/)
+        if (!opMatch) return { key: pair.trim(), op: '=', value: '' }
+        const op  = opMatch[0]
+        const key = pair.slice(0, opMatch.index).trim()
+        const val = pair.slice(opMatch.index + op.length).replace(/^["']|["']$/g, '').trim()
+        return { key, op, value: val }
       }).filter(p => p.key)
     : []
   return { name, labels }
@@ -90,7 +106,7 @@ function parseMetric(s) {
 function buildMetric(name, labels) {
   const valid = labels.filter(l => (l.key || '').trim())
   return valid.length
-    ? `${name}{${valid.map(l => `${l.key}="${l.value}"`).join(',')}}`
+    ? `${name}{${valid.map(l => `${l.key}${l.op || '='}"${l.value}"`).join(',')}}`
     : name
 }
 
@@ -115,16 +131,54 @@ function MetricsInput({ value, onChange }) {
     onChange(newValue)
   }
 
+  function updateLabel(i, field, val) {
+    const next = internalLabels.map((l, idx) => idx === i ? { ...l, [field]: val } : l)
+    setInternalLabels(next)
+    commit(internalName, next)
+  }
+  function addLabel() {
+    const next = [...internalLabels, { key: '', op: '=', value: '' }]
+    setInternalLabels(next)
+    commit(internalName, next)
+  }
+  function removeLabel(i) {
+    const next = internalLabels.filter((_, idx) => idx !== i)
+    setInternalLabels(next)
+    commit(internalName, next)
+  }
+
   return (
     <div>
       <input type="text" value={internalName} placeholder="metric_name"
         style={{ marginBottom: 4 }}
         onChange={e => { setInternalName(e.target.value); commit(e.target.value, internalLabels) }} />
-      <KVEditor
-        rows={internalLabels}
-        onChange={rows => { setInternalLabels(rows); commit(internalName, rows) }}
-        keyPlaceholder="label" valuePlaceholder="value"
-      />
+      {internalLabels.length > 0 && (
+        <table className="kv-table" style={{ marginBottom: 4 }}>
+          <colgroup>
+            <col /><col style={{ width: 52 }} /><col /><col style={{ width: 28 }} />
+          </colgroup>
+          <thead><tr><th>label</th><th>op</th><th>value</th><th></th></tr></thead>
+          <tbody>
+            {internalLabels.map((l, i) => (
+              <tr key={i}>
+                <td><input type="text" value={l.key} placeholder="label"
+                  onChange={e => updateLabel(i, 'key', e.target.value)} /></td>
+                <td>
+                  <select value={l.op || '='} onChange={e => updateLabel(i, 'op', e.target.value)}
+                    style={{ fontFamily: 'monospace', fontWeight: 700 }}>
+                    {LABEL_MATCHER_OPS.map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                </td>
+                <td><input type="text" value={l.value}
+                  placeholder={l.op?.includes('~') ? 'regex' : 'value'}
+                  onChange={e => updateLabel(i, 'value', e.target.value)} /></td>
+                <td><button className="btn btn-ghost btn-icon" onClick={() => removeLabel(i)}>×</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <button className="btn btn-ghost btn-sm" onClick={addLabel}>+ Add matcher</button>
     </div>
   )
 }
@@ -174,19 +228,18 @@ const emptyRule = () => ({
   alertTypeVersion: '',
   ruleName: '',
   vars: [],        // [{ key, value, type }]
+  expr: '',        // direct PromQL expression (used for direct-expr type and as explicit override)
+  exprMode: 'raw', // 'visual' | 'raw'
   for: '',
   description: '',
   labels: [],
   severity: 'warning',
 })
 
-const emptyInhibit = () => ({ sourceRule: '', targetRule: '' })
-
 const emptyForm = () => ({
   groupName:   '',
   groupLabels: [],   // [{key, value}]
   rules: [],
-  inhibit: [],
 })
 
 export default function AlertSuiteEditor() {
@@ -199,14 +252,27 @@ export default function AlertSuiteEditor() {
   const [status, setStatus]         = useState('')
   const [product, setProduct]       = useState('')
   const [showPreview, setShowPreview] = useState(false)
+  const [metricsDict, setMetricsDict] = useState([])
+
+  // Import state
+  const [importOpen, setImportOpen]       = useState(false)
+  const [importLoading, setImportLoading] = useState(false)
+  const [importGroups, setImportGroups]   = useState([])
+  const [importSel, setImportSel]         = useState({})  // key: `${gi}:${ri}` → bool
+  const [importPath, setImportPath]       = useState('')  // relative path to scan; empty = gitops-deploy/
 
   // Cache of alert type var declarations: { "name@version": [{name, description, type}] }
   const [varDeclCache, setVarDeclCache] = useState({})
 
   const load = useCallback(async () => {
-    const [suites, at] = await Promise.all([listTemplates(TYPE), listTemplates('alert-type')])
+    const [suites, at, md] = await Promise.all([
+      listTemplates(TYPE),
+      listTemplates('alert-type'),
+      getMetricsDict(),
+    ])
     setTemplates(suites)
     setAlertTypes(at)
+    setMetricsDict(md.metrics || [])
     try {
       const r = await fetch('/api/defaults')
       const d = await r.json()
@@ -231,7 +297,8 @@ export default function AlertSuiteEditor() {
     const s = data.parsed?.alertSuite || {}
 
     const rules = await Promise.all((s.rules || []).map(async r => {
-      const decls = await loadVarDecls(r.alertTypeName, r.alertTypeVersion)
+      const isBuiltin = r.alertTypeName === DIRECT_EXPR_TYPE
+      const decls = isBuiltin ? DIRECT_EXPR_VARS : await loadVarDecls(r.alertTypeName, r.alertTypeVersion)
       const savedVars = r.vars || {}
       const vars = decls.length
         ? decls.map(d => ({ key: d.name, value: String(savedVars[d.name] ?? ''), type: d.type || 'string' }))
@@ -241,6 +308,8 @@ export default function AlertSuiteEditor() {
         alertTypeVersion: r.alertTypeVersion || '',
         ruleName:         r.ruleName         || '',
         vars,
+        expr:     r.expr     || '',
+        exprMode: r.exprMode || 'raw',
         for:         r.for         || '',
         description: r.description || '',
         labels:      objectToKvArray(r.labels || {}),
@@ -261,7 +330,6 @@ export default function AlertSuiteEditor() {
       groupName:   s.name || name,
       groupLabels,
       rules,
-      inhibit: (s.inhibit || []).map(i => ({ sourceRule: i.sourceRule || '', targetRule: i.targetRule || '' })),
     })
     setSelected({ name, version })
     setIsNew(false)
@@ -274,6 +342,18 @@ export default function AlertSuiteEditor() {
   }
 
   async function handleRuleTypeChange(i, field, val) {
+    // Built-in direct-expr: single expr var, no version needed
+    if (field === 'alertTypeName' && val === DIRECT_EXPR_TYPE) {
+      setForm(f => ({
+        ...f,
+        rules: f.rules.map((r, idx) => {
+          if (idx !== i) return r
+          const prevExpr = directExprValue(r.vars)
+          return { ...r, alertTypeName: DIRECT_EXPR_TYPE, alertTypeVersion: '', vars: [{ key: 'expr', value: prevExpr, type: 'string' }] }
+        })
+      }))
+      return
+    }
     setForm(f => ({ ...f, rules: f.rules.map((r, idx) => idx === i ? { ...r, [field]: val } : r) }))
     const rule = { ...form.rules[i], [field]: val }
     if (rule.alertTypeName && rule.alertTypeVersion) {
@@ -300,13 +380,73 @@ export default function AlertSuiteEditor() {
   function addRule()    { setForm(f => ({ ...f, rules: [...f.rules, emptyRule()] })) }
   function removeRule(i){ setForm(f => ({ ...f, rules: f.rules.filter((_, idx) => idx !== i) })) }
 
-  function updateInhibit(i, field, val) {
-    setForm(f => ({ ...f, inhibit: f.inhibit.map((r, idx) => idx === i ? { ...r, [field]: val } : r) }))
+  async function openImport() {
+    setImportOpen(true)
+    setImportLoading(true)
+    setImportSel({})
+    try {
+      const { groups } = await importPrometheusRules(importPath)
+      setImportGroups(groups || [])
+    } catch {
+      setImportGroups([])
+    }
+    setImportLoading(false)
   }
-  function addInhibit()    { setForm(f => ({ ...f, inhibit: [...f.inhibit, emptyInhibit()] })) }
-  function removeInhibit(i){ setForm(f => ({ ...f, inhibit: f.inhibit.filter((_, idx) => idx !== i) })) }
 
-  const ruleNames = form.rules.map(r => r.ruleName).filter(Boolean)
+  async function rescanImport(path) {
+    setImportPath(path)
+    setImportLoading(true)
+    setImportSel({})
+    try {
+      const { groups } = await importPrometheusRules(path)
+      setImportGroups(groups || [])
+    } catch {
+      setImportGroups([])
+    }
+    setImportLoading(false)
+  }
+
+  function toggleImportRule(gi, ri) {
+    const key = `${gi}:${ri}`
+    setImportSel(s => ({ ...s, [key]: !s[key] }))
+  }
+
+  function confirmImport() {
+    const toAdd = []
+    let mergedGroupLabels = null
+    importGroups.forEach((g, gi) => {
+      const anySelected = g.rules.some((_, ri) => importSel[`${gi}:${ri}`])
+      if (anySelected && g.groupLabels && Object.keys(g.groupLabels).length) {
+        mergedGroupLabels = mergedGroupLabels || g.groupLabels
+      }
+      g.rules.forEach((r, ri) => {
+        if (!importSel[`${gi}:${ri}`]) return
+        toAdd.push({
+          ...emptyRule(),
+          alertTypeName:    DIRECT_EXPR_TYPE,
+          alertTypeVersion: '',
+          vars:             [{ key: 'expr', value: r.expr || '', type: 'string' }],
+          ruleName:         r.alertName || '',
+          for:              r.for       || '',
+          description:      r.annotations?.description || r.annotations?.summary || '',
+          severity:         r.labels?.severity || 'warning',
+          labels:           objectToKvArray(Object.fromEntries(
+            Object.entries(r.labels || {}).filter(([k]) => k !== 'severity')
+          )),
+        })
+      })
+    })
+    if (toAdd.length) {
+      setForm(f => ({
+        ...f,
+        rules: [...f.rules, ...toAdd],
+        groupLabels: f.groupLabels.length === 0 && mergedGroupLabels
+          ? objectToKvArray(mergedGroupLabels)
+          : f.groupLabels,
+      }))
+    }
+    setImportOpen(false)
+  }
 
   function buildPayload() {
     return {
@@ -314,20 +454,23 @@ export default function AlertSuiteEditor() {
         name:        form.groupName,
         groupLabels: kvArrayToObject(form.groupLabels),
         rules: form.rules.map(r => {
+          const isBuiltin = r.alertTypeName === DIRECT_EXPR_TYPE
+          const exprVal = isBuiltin ? directExprValue(r.vars) : (r.expr || '')
           const obj = {
             alertTypeName:    r.alertTypeName,
-            alertTypeVersion: r.alertTypeVersion,
+            alertTypeVersion: isBuiltin ? undefined : r.alertTypeVersion,
             ruleName:         r.ruleName,
             vars:             kvArrayToObject(r.vars),
             severity:         r.severity,
           }
+          if (exprVal) obj.expr = exprVal
+          if (r.exprMode && r.exprMode !== 'raw') obj.exprMode = r.exprMode
           if (r.for)         obj.for = r.for
           if (r.description) obj.description = r.description
           const labels = kvArrayToObject(r.labels)
           if (Object.keys(labels).length) obj.labels = labels
           return obj
         }),
-        ...(form.inhibit.length > 0 && { inhibit: form.inhibit }),
       }
     }
   }
@@ -431,37 +574,50 @@ export default function AlertSuiteEditor() {
             <div className="form-card">
               <div className="form-card-title">
                 Rules
-                <button className="btn btn-secondary btn-sm" onClick={addRule}>+ Add Rule</button>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button className="btn btn-secondary btn-sm" onClick={openImport}>Import Rules…</button>
+                  <button className="btn btn-secondary btn-sm" onClick={addRule}>+ Add Rule</button>
+                </div>
               </div>
               {form.rules.length === 0 && <p className="text-muted">No rules yet.</p>}
               {form.rules.map((rule, i) => {
-                const versionsForType = rule.alertTypeName ? (alertTypes[rule.alertTypeName] || []) : []
+                const isBuiltin = rule.alertTypeName === DIRECT_EXPR_TYPE
+                const versionsForType = rule.alertTypeName && !isBuiltin ? (alertTypes[rule.alertTypeName] || []) : []
                 return (
                   <div key={i} style={{ border: '1px solid #e5e7eb', borderRadius: 6, padding: 14, marginBottom: 10 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
                       <span style={{ fontWeight: 600, fontSize: 13 }}>
                         Rule {i + 1}{rule.ruleName ? `: ${rule.ruleName}` : ''}
+                        {isBuiltin && (
+                          <span style={{ marginLeft: 8, fontSize: 10, background: '#dbeafe', color: '#1d4ed8',
+                            padding: '1px 6px', borderRadius: 4, fontWeight: 600 }}>
+                            direct-expr
+                          </span>
+                        )}
                       </span>
                       <button className="btn btn-danger btn-sm" onClick={() => removeRule(i)}>Remove</button>
                     </div>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 10 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: isBuiltin ? '1fr 1fr' : '1fr 1fr 1fr', gap: 10, marginBottom: 10 }}>
                       <div className="form-row">
                         <label>Alert Type *</label>
                         <select value={rule.alertTypeName}
                           onChange={e => handleRuleTypeChange(i, 'alertTypeName', e.target.value)}>
                           <option value="">— select —</option>
+                          <option value={DIRECT_EXPR_TYPE}>✏ direct-expr (built-in)</option>
                           {Object.keys(alertTypes).map(n => <option key={n} value={n}>{n}</option>)}
                         </select>
                       </div>
-                      <div className="form-row">
-                        <label>Version *</label>
-                        <select value={rule.alertTypeVersion}
-                          onChange={e => handleRuleTypeChange(i, 'alertTypeVersion', e.target.value)}>
-                          <option value="">— select —</option>
-                          {versionsForType.map(v => <option key={v} value={v}>{v}</option>)}
-                        </select>
-                      </div>
+                      {!isBuiltin && (
+                        <div className="form-row">
+                          <label>Version *</label>
+                          <select value={rule.alertTypeVersion}
+                            onChange={e => handleRuleTypeChange(i, 'alertTypeVersion', e.target.value)}>
+                            <option value="">— select —</option>
+                            {versionsForType.map(v => <option key={v} value={v}>{v}</option>)}
+                          </select>
+                        </div>
+                      )}
                       <div className="form-row">
                         <label>Rule Name *</label>
                         <input type="text" value={rule.ruleName} placeholder="e.g. high-cpu"
@@ -469,7 +625,8 @@ export default function AlertSuiteEditor() {
                       </div>
                     </div>
 
-                    {rule.vars.length > 0 && (
+                    {/* Var Values — only for template-based types */}
+                    {!isBuiltin && rule.vars.length > 0 && (
                       <div className="form-row">
                         <label>Var Values</label>
                         <table className="kv-table" style={{ width: '100%', tableLayout: 'fixed' }}>
@@ -513,12 +670,46 @@ export default function AlertSuiteEditor() {
                         </table>
                       </div>
                     )}
-                    {rule.vars.length === 0 && rule.alertTypeName && rule.alertTypeVersion && (
+                    {!isBuiltin && rule.vars.length === 0 && rule.alertTypeName && rule.alertTypeVersion && (
                       <p className="text-muted">This alert type declares no vars.</p>
                     )}
-                    {rule.vars.length === 0 && (!rule.alertTypeName || !rule.alertTypeVersion) && (
-                      <p className="text-muted">Select alert type + version to auto-generate var fields.</p>
-                    )}
+
+                    {/* Expression editor — always shown for ALL rules */}
+                    {(() => {
+                      const exprVal = isBuiltin ? directExprValue(rule.vars) : rule.expr
+                      const setExpr = val => isBuiltin
+                        ? updateRule(i, 'vars', [{ key: 'expr', value: val, type: 'string' }])
+                        : updateRule(i, 'expr', val)
+                      return (
+                        <div className="form-row" style={{ marginTop: 10 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                            <label style={{ marginBottom: 0 }}>
+                              Expression (PromQL)
+                              {!isBuiltin && <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 400, marginLeft: 6 }}>overrides template rendering</span>}
+                            </label>
+                            <div style={{ display: 'flex', borderRadius: 5, overflow: 'hidden', border: '1px solid #d1d5db', fontSize: 11 }}>
+                              {[['visual', 'Visual Builder'], ['raw', 'Raw / PromQL']].map(([k, lbl]) => (
+                                <button key={k} style={{
+                                  padding: '2px 10px', border: 'none', cursor: 'pointer', fontWeight: 600,
+                                  background: rule.exprMode === k ? '#6366f1' : '#fff',
+                                  color: rule.exprMode === k ? '#fff' : '#6b7280',
+                                }} onClick={() => updateRule(i, 'exprMode', k)}>{lbl}</button>
+                              ))}
+                            </div>
+                          </div>
+                          <Suspense fallback={
+                            <div style={{ height: 56, background: '#0f172a', borderRadius: 6,
+                              display: 'flex', alignItems: 'center', paddingLeft: 14,
+                              color: '#475569', fontSize: 12 }}>Loading…</div>
+                          }>
+                            {rule.exprMode === 'visual'
+                              ? <PromQLBuilder dict={metricsDict} onChange={setExpr} />
+                              : <PromQLEditor value={exprVal} metrics={metricsDict} onChange={setExpr} />
+                            }
+                          </Suspense>
+                        </div>
+                      )
+                    })()}
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginTop: 10 }}>
                       <div className="form-row">
@@ -548,38 +739,6 @@ export default function AlertSuiteEditor() {
                   </div>
                 )
               })}
-            </div>
-
-            <div className="form-card">
-              <div className="form-card-title">
-                Inhibit Rules
-                <button className="btn btn-secondary btn-sm" onClick={addInhibit}>+ Add</button>
-              </div>
-              <p className="text-muted" style={{ marginBottom: 8 }}>
-                Source rule suppresses target rule.
-              </p>
-              {form.inhibit.length === 0 && <p className="text-muted">No inhibit rules.</p>}
-              {form.inhibit.map((inh, i) => (
-                <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'flex-end' }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 3 }}>Source Rule</div>
-                    <select value={inh.sourceRule} onChange={e => updateInhibit(i, 'sourceRule', e.target.value)}>
-                      <option value="">— select —</option>
-                      {ruleNames.map(n => <option key={n} value={n}>{n}</option>)}
-                    </select>
-                  </div>
-                  <div style={{ paddingBottom: 8, color: '#9ca3af' }}>→ suppresses →</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 3 }}>Target Rule</div>
-                    <select value={inh.targetRule} onChange={e => updateInhibit(i, 'targetRule', e.target.value)}>
-                      <option value="">— select —</option>
-                      {ruleNames.map(n => <option key={n} value={n}>{n}</option>)}
-                    </select>
-                  </div>
-                  <button className="btn btn-ghost btn-icon" style={{ marginBottom: 2 }}
-                    onClick={() => removeInhibit(i)}>×</button>
-                </div>
-              ))}
             </div>
 
             <div className="btn-row">
@@ -619,6 +778,97 @@ export default function AlertSuiteEditor() {
 
       {modal && (
         <VersionModal defaultVersion={modal} onSave={handleSave} onCancel={() => setModal(null)} />
+      )}
+
+      {importOpen && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+        }}>
+          <div style={{
+            background: '#fff', borderRadius: 10, padding: 24, minWidth: 560, maxWidth: 760,
+            maxHeight: '82vh', display: 'flex', flexDirection: 'column', gap: 14,
+            boxShadow: '0 8px 40px rgba(0,0,0,0.18)',
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>Import Prometheus Rules</div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
+                type="text"
+                value={importPath}
+                onChange={e => setImportPath(e.target.value)}
+                placeholder="Path to scan (default: gitops-deploy/)"
+                style={{ flex: 1, fontFamily: 'monospace', fontSize: 12 }}
+                onKeyDown={e => e.key === 'Enter' && rescanImport(importPath)}
+              />
+              <button className="btn btn-secondary btn-sm" onClick={() => rescanImport(importPath)}>
+                Scan
+              </button>
+            </div>
+            {importLoading && <p className="text-muted">Scanning for PrometheusRule YAML files…</p>}
+            {!importLoading && importGroups.length === 0 && (
+              <p className="text-muted">No PrometheusRule YAML files found. Try a different path.</p>
+            )}
+            {!importLoading && importGroups.length > 0 && (
+              <div style={{ overflowY: 'auto', flex: 1 }}>
+                {importGroups.map((g, gi) => (
+                  <div key={gi} style={{ marginBottom: 14 }}>
+                    <div style={{ marginBottom: 6 }}>
+                      <div style={{ fontWeight: 600, fontSize: 12, color: '#6b7280' }}>
+                        {g.groupName}
+                        <span style={{ fontWeight: 400, marginLeft: 8, color: '#9ca3af' }}>{g.sourceFile}</span>
+                      </div>
+                      {g.groupLabels && Object.keys(g.groupLabels).length > 0 && (
+                        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 4 }}>
+                          <span style={{ fontSize: 11, color: '#9ca3af' }}>group labels:</span>
+                          {Object.entries(g.groupLabels).map(([k, v]) => (
+                            <span key={k} style={{
+                              fontSize: 11, fontFamily: 'monospace',
+                              background: '#f0fdf4', color: '#166534',
+                              padding: '1px 6px', borderRadius: 3,
+                            }}>{k}: {v}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <table className="kv-table" style={{ width: '100%' }}>
+                      <thead>
+                        <tr>
+                          <th style={{ width: 28 }}></th>
+                          <th style={{ width: '28%' }}>alert</th>
+                          <th>expr</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {g.rules.map((r, ri) => {
+                          const key = `${gi}:${ri}`
+                          return (
+                            <tr key={ri}>
+                              <td>
+                                <input type="checkbox" checked={!!importSel[key]}
+                                  onChange={() => toggleImportRule(gi, ri)} />
+                              </td>
+                              <td style={{ fontWeight: 500 }}>{r.alertName || '—'}</td>
+                              <td style={{ fontFamily: 'monospace', fontSize: 11, color: '#374151', maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                title={r.expr}>{r.expr}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button className="btn btn-secondary" onClick={() => setImportOpen(false)}>Cancel</button>
+              <button className="btn btn-primary"
+                disabled={!Object.values(importSel).some(Boolean)}
+                onClick={confirmImport}>
+                Import Selected
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

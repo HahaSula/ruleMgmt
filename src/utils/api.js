@@ -109,10 +109,10 @@ export async function deleteStage(product, site, relunit, stage) {
   return res.json()
 }
 
-// ─── System chart metadata ────────────────────────────────────────────────────
+// ─── Chart metadata (generic) ─────────────────────────────────────────────────
 
-export async function getSystemChartMeta(name, version) {
-  const res = await fetch(`${BASE}/templates/system/${encodeURIComponent(name)}/${encodeURIComponent(version)}/chartmeta`)
+export async function getChartMeta(type, name, version) {
+  const res = await fetch(`${BASE}/templates/${encodeURIComponent(type)}/${encodeURIComponent(name)}/${encodeURIComponent(version)}/chartmeta`)
   if (!res.ok) return null
   return res.json()
 }
@@ -147,6 +147,27 @@ export async function saveMetricsDict(metrics) {
     body: JSON.stringify({ metrics }),
   })
   return res.json()
+}
+
+// ─── Import ───────────────────────────────────────────────────────────────────
+
+export async function importPrometheusRules(scanPath = '') {
+  const qs = scanPath ? `?dir=${encodeURIComponent(scanPath)}` : ''
+  const res = await fetch(`${BASE}/import/prometheus-rules${qs}`)
+  if (!res.ok) return { groups: [] }
+  return res.json()
+}
+
+// ─── Route pruning ───────────────────────────────────────────────────────────
+
+export async function pruneRoutesAPI(routeRules, routeMatchers) {
+  const res = await fetch(`${BASE}/prune-routes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ routeRules, routeMatchers }),
+  })
+  if (!res.ok) return null
+  return res.json()  // { routeRules: [...nested...], stats: { before, after } }
 }
 
 // ─── Helm render ──────────────────────────────────────────────────────────────

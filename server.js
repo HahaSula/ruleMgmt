@@ -84,30 +84,31 @@ spec:
             summary: {{ .ruleName | quote }}
         {{- end }}
 `,
-  'system': `apiVersion: monitoring.coreos.com/v1alpha1
+  'amconfig': `apiVersion: monitoring.coreos.com/v1alpha1
 kind: AlertmanagerConfig
 metadata:
-  name: {{ if .Values.global.product }}{{ .Values.global.product }}-{{ end }}{{ .Values.system.name | default .Values.system.alertSuite }}
+  name: {{ if .Values.global.product }}{{ .Values.global.product }}-{{ end }}{{ .Values.configName }}
   labels:
     app.kubernetes.io/managed-by: Helm
 spec:
   route:
-    groupBy:
-      - {{ .Values.system.groupLabel | quote }}
     groupWait: 30s
     groupInterval: 5m
     repeatInterval: 12h
-    {{- if .Values.system.routes }}
-    receiver: {{ if .Values.global.product }}"{{ .Values.global.product }}-{{ (index .Values.system.routes 0).receiver }}"{{ else }}{{ (index .Values.system.routes 0).receiver | quote }}{{ end }}
+    receiver: {{ if .Values.global.product }}"{{ .Values.global.product }}-{{ .Values.defaultReceiver }}"{{ else }}{{ .Values.defaultReceiver | quote }}{{ end }}
+    {{- if .Values.routeRules }}
     routes:
-      {{- range .Values.system.routes }}
-      - matchers:
-          - name: severity
-            value: {{ .severity | quote }}
-        receiver: {{ if $.Values.global.product }}"{{ $.Values.global.product }}-{{ .receiver }}"{{ else }}{{ .receiver | quote }}{{ end }}
+      {{- range .Values.routeRules }}
+      - receiver: {{ if $.Values.global.product }}"{{ $.Values.global.product }}-{{ .receiver }}"{{ else }}{{ .receiver | quote }}{{ end }}
+        {{- if .matchers }}
+        matchers:
+          {{- range .matchers }}
+          - name: {{ .key | quote }}
+            matchType: {{ .op | quote }}
+            value: {{ .value | quote }}
+          {{- end }}
+        {{- end }}
       {{- end }}
-    {{- else }}
-    receiver: "default"
     {{- end }}
 
   receivers:
@@ -121,6 +122,21 @@ spec:
           sendResolved: {{ .send_resolved }}
         {{- end }}
       {{- end }}
+      {{- if .slack_configs }}
+      slackConfigs:
+        {{- range .slack_configs }}
+        - apiURL: {{ .api_url | quote }}
+          channel: {{ .channel | quote }}
+          sendResolved: {{ .send_resolved }}
+        {{- end }}
+      {{- end }}
+      {{- if .pagerduty_configs }}
+      pagerdutyConfigs:
+        {{- range .pagerduty_configs }}
+        - routingKey: {{ .routing_key | quote }}
+          sendResolved: {{ .send_resolved }}
+        {{- end }}
+      {{- end }}
       {{- if .email_configs }}
       emailConfigs:
         {{- range .email_configs }}
@@ -130,43 +146,21 @@ spec:
           requireTLS: false
         {{- end }}
       {{- end }}
-      {{- if .slack_configs }}
-      slackConfigs:
-        {{- range .slack_configs }}
-        - apiURL: {{ .api_url | quote }}
-          channel: {{ .channel | quote }}
-        {{- end }}
-      {{- end }}
-      {{- if .pagerduty_configs }}
-      pagerdutyConfigs:
-        {{- range .pagerduty_configs }}
-        - routingKey: {{ .routing_key | quote }}
-        {{- end }}
-      {{- end }}
     {{- end }}
     {{- else }}
-    - name: "default"
+    - name: {{ if .Values.global.product }}"{{ .Values.global.product }}-{{ .Values.defaultReceiver }}"{{ else }}{{ .Values.defaultReceiver | quote }}{{ end }}
+    {{- range .Values.routeRules }}
+    {{- if ne .receiver $.Values.defaultReceiver }}
+    - name: {{ if $.Values.global.product }}"{{ $.Values.global.product }}-{{ .receiver }}"{{ else }}{{ .receiver | quote }}{{ end }}
     {{- end }}
-
-  {{- if and .Values.alertSuite .Values.alertSuite.inhibit }}
-  inhibitRules:
-    {{- range .Values.alertSuite.inhibit }}
-    - sourceMatch:
-        - name: alertname
-          value: {{ .sourceRule | quote }}
-      targetMatch:
-        - name: alertname
-          value: {{ .targetRule | quote }}
-      equal:
-        - namespace
     {{- end }}
-  {{- end }}
+    {{- end }}
 `,
 }
 
 const HELM_TEMPLATE_FILENAMES = {
   'alert-suite': 'prometheus-rule.yaml',
-  'system':      'alertmanager-config.yaml',
+  'amconfig':    'alertmanager-config.yaml',
 }
 
 // Save / create a template version
@@ -191,36 +185,27 @@ app.post('/api/templates/:type/:name/:version', async (req, res) => {
 
   const chartFile = path.join(dir, 'Chart.yaml')
   const semver = version.replace(/^v/, '')
-  if (type === 'system') {
-    const ruleGroups = req.body.data?.system?.ruleGroups || []
-    // backward compat: single alertSuite field
-    const legacyName = req.body.data?.system?.alertSuite
-    const legacyVer  = (req.body.data?.system?.alertSuiteVersion || '').replace(/^v/, '')
+  if (type === 'amconfig') {
+    const groups = req.body.data?.groups || []
     const chart = { apiVersion: 'v2', name, version: semver, type: 'application' }
-    let deps = []
-    if (ruleGroups.length > 0) {
-      deps = ruleGroups
-        .filter(rg => rg.name && rg.version)
-        .map(rg => ({
-          name:       rg.name,
-          version:    rg.version.replace(/^v/, ''),
-          repository: `file://../../../alert-suite/${rg.name}/v${rg.version.replace(/^v/, '')}`,
-        }))
-    } else if (legacyName && legacyVer) {
-      deps = [{ name: legacyName, version: legacyVer, repository: `file://../../../alert-suite/${legacyName}/v${legacyVer}` }]
+    if (groups.length > 0) {
+      chart.dependencies = groups
+        .filter(g => g.name && g.version)
+        .map(g => {
+          const ver = g.version.replace(/^v/, '')
+          return {
+            name:       g.name,
+            version:    ver,
+            repository: `file://../../../alert-suite/${g.name}/v${ver}`,
+          }
+        })
     }
-    if (deps.length) chart.dependencies = deps
     await fs.writeFile(chartFile, yaml.dump(chart, { lineWidth: -1 }), 'utf-8')
   } else {
     try {
       await fs.access(chartFile)
     } catch {
-      const chart = {
-        apiVersion: 'v2',
-        name,
-        version: semver,
-        type: 'application'
-      }
+      const chart = { apiVersion: 'v2', name, version: semver, type: 'application' }
       await fs.writeFile(chartFile, yaml.dump(chart), 'utf-8')
     }
   }
@@ -396,11 +381,11 @@ app.post('/api/metrics-dict', async (req, res) => {
   }
 })
 
-// ─── System chart metadata (name from Chart.yaml) ────────────────────────────
+// ─── Chart metadata (name + version from Chart.yaml) — generic for any type ──
 
-app.get('/api/templates/system/:name/:version/chartmeta', async (req, res) => {
-  const { name, version } = req.params
-  const file = path.join(TEMPLATES_DIR, 'system', name, version, 'Chart.yaml')
+app.get('/api/templates/:type/:name/:version/chartmeta', async (req, res) => {
+  const { type, name, version } = req.params
+  const file = path.join(TEMPLATES_DIR, type, name, version, 'Chart.yaml')
   try {
     const content = await fs.readFile(file, 'utf-8')
     const chart = yaml.load(content)
@@ -476,6 +461,144 @@ app.post('/api/helm/render/:product/:site/:relunit/:stage', async (req, res) => 
     res.json({ ok: true, output: log.join('\n') })
   } catch (err) {
     res.json({ ok: false, output: [...log, err.message].join('\n') })
+  }
+})
+
+// ─── Import: scan for PrometheusRule YAML files ───────────────────────────────
+
+app.get('/api/import/prometheus-rules', async (req, res) => {
+  const requestedDir = req.query.dir ? req.query.dir.trim() : ''
+  const scanRoot = requestedDir
+    ? path.resolve(REPO_ROOT, requestedDir)
+    : GITOPS_DIR
+  // Reject paths that escape the repo root
+  if (!scanRoot.startsWith(REPO_ROOT)) {
+    return res.status(400).json({ error: 'Path is outside the project directory' })
+  }
+
+  const groups = []
+  async function scanDir(dir) {
+    let entries
+    try { entries = await fs.readdir(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      const fp = path.join(dir, e.name)
+      if (e.isDirectory()) { await scanDir(fp); continue }
+      if (!e.name.endsWith('.yaml') && !e.name.endsWith('.yml')) continue
+      try {
+        const content = await fs.readFile(fp, 'utf-8')
+        const docs = (yaml.loadAll(content) || []).filter(Boolean)
+        for (const doc of docs) {
+          if (doc?.kind === 'PrometheusRule' && Array.isArray(doc?.spec?.groups)) {
+            for (const g of doc.spec.groups) {
+              if (!Array.isArray(g.rules) || !g.rules.length) continue
+              groups.push({
+                groupName: g.name || 'unnamed',
+                groupLabels: g.labels || {},
+                sourceFile: fp.replace(REPO_ROOT + path.sep, '').replace(/\\/g, '/'),
+                rules: g.rules.map(r => ({
+                  alertName: r.alert || '',
+                  expr: String(r.expr || ''),
+                  for: r.for || '',
+                  labels: r.labels || {},
+                  annotations: r.annotations || {},
+                })),
+              })
+            }
+          }
+        }
+      } catch { /* skip unreadable files */ }
+    }
+  }
+  await scanDir(scanRoot)
+  res.json({ groups })
+})
+
+// ─── Prune routes (JS port of scripts/prune_routes.py) ───────────────────────
+
+function mkey(m) { return `${m.key}\x00${m.op ?? '='}\x00${m.value}` }
+
+function stripTop(routes, top) {
+  const topKeys = new Set((top || []).filter(m => m.key?.trim()).map(mkey))
+  return routes
+    .filter(r => r.receiver && (r.matchers || []).some(m => m.key?.trim()))
+    .map(r => ({ ...r, matchers: r.matchers.filter(m => m.key?.trim() && !topKeys.has(mkey(m))) }))
+}
+
+function buildRouteTree(routes) {
+  if (routes.length <= 1) return [...routes]
+
+  // Build matcher → route-index mapping
+  const mkToIdx = {}
+  const mkToObj = {}
+  routes.forEach((r, i) => {
+    (r.matchers || []).forEach(m => {
+      const k = mkey(m)
+      ;(mkToIdx[k] = mkToIdx[k] || []).push(i)
+      mkToObj[k] = m
+    })
+  })
+
+  const shared = Object.entries(mkToIdx).filter(([, idxs]) => idxs.length >= 2)
+  if (!shared.length) return [...routes]
+
+  // For each unique group of route indices, compute full matcher intersection
+  const seenGroups = new Set()
+  const candidates = []
+  for (const [, idxs] of shared) {
+    const gkey = [...idxs].sort().join(',')
+    if (seenGroups.has(gkey)) continue
+    seenGroups.add(gkey)
+
+    let common = null
+    for (const i of idxs) {
+      const rkeys = new Set((routes[i].matchers || []).map(mkey))
+      common = common === null ? rkeys : new Set([...common].filter(k => rkeys.has(k)))
+    }
+    if (common && common.size)
+      candidates.push({ indices: idxs, common, score: [idxs.length, common.size] })
+  }
+
+  if (!candidates.length) return [...routes]
+
+  // Pick best: most routes grouped, then most matchers hoisted
+  const best = candidates.reduce((a, b) =>
+    b.score[0] > a.score[0] || (b.score[0] === a.score[0] && b.score[1] > a.score[1]) ? b : a
+  )
+  const gSet = new Set(best.indices)
+  const commonKeys = best.common
+  const parentMatchers = [...commonKeys].map(k => mkToObj[k])
+
+  // Most common receiver among grouped routes becomes parent receiver
+  const recvCounts = {}
+  best.indices.forEach(i => { recvCounts[routes[i].receiver] = (recvCounts[routes[i].receiver] || 0) + 1 })
+  const parentRecv = Object.entries(recvCounts).sort((a, b) => b[1] - a[1])[0][0]
+
+  // Children = grouped routes minus shared matchers
+  const childrenRaw = best.indices
+    .map(i => ({ receiver: routes[i].receiver, matchers: (routes[i].matchers || []).filter(m => !commonKeys.has(mkey(m))) }))
+    .filter(c => c.matchers.length > 0 || c.receiver !== parentRecv)
+
+  const children  = buildRouteTree(childrenRaw)
+  const ungrouped = buildRouteTree(routes.filter((_, i) => !gSet.has(i)))
+  const parent    = { receiver: parentRecv, matchers: parentMatchers, ...(children.length ? { routes: children } : {}) }
+  return [parent, ...ungrouped]
+}
+
+function pruneRoutesFn(routeRules, routeMatchers) {
+  return buildRouteTree(stripTop(routeRules, routeMatchers))
+}
+
+function countNodes(routes) {
+  return routes.reduce((n, r) => n + 1 + countNodes(r.routes || []), 0)
+}
+
+app.post('/api/prune-routes', (req, res) => {
+  const { routeRules = [], routeMatchers = [] } = req.body
+  try {
+    const pruned = pruneRoutesFn(routeRules, routeMatchers)
+    res.json({ routeRules: pruned, stats: { before: routeRules.length, after: countNodes(pruned) } })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
   }
 })
 
