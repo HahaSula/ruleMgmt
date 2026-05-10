@@ -36,20 +36,21 @@ function buildRuleGroupPreview(form, product) {
     const ruleExpr = rule.alertTypeName === DIRECT_EXPR_TYPE
       ? directExprValue(rule.vars)
       : (rule.expr || '')
+    const displayExpr = wrapExpr(ruleExpr, form.subscription)
     if (rule.alertTypeName && rule.alertTypeName !== DIRECT_EXPR_TYPE) {
       yaml += `          # type: ${rule.alertTypeName}`
       if (rule.alertTypeVersion) yaml += `@${rule.alertTypeVersion}`
       yaml += `\n`
       const filledVars = (rule.vars || []).filter(v => v.key && v.value)
-      if (filledVars.length && !ruleExpr) {
+      if (filledVars.length && !displayExpr) {
         yaml += `          expr: |\n`
         yaml += `            # rendered by Helm from ${rule.alertTypeName}\n`
         for (const v of filledVars) yaml += `            # ${v.key}: ${v.value}\n`
       } else {
-        yaml += `          expr: ${ruleExpr ? JSON.stringify(ruleExpr) : '"# enter a PromQL expression"'}\n`
+        yaml += `          expr: ${displayExpr ? JSON.stringify(displayExpr) : '"# enter a PromQL expression"'}\n`
       }
     } else {
-      yaml += `          expr: ${ruleExpr ? JSON.stringify(ruleExpr) : '"# enter a PromQL expression"'}\n`
+      yaml += `          expr: ${displayExpr ? JSON.stringify(displayExpr) : '"# enter a PromQL expression"'}\n`
     }
     if (rule.for) yaml += `          for: ${rule.for}\n`
     yaml += `          labels:\n`
@@ -252,7 +253,24 @@ const emptyForm = () => ({
   groupLabels:    [],   // [{key, value}]
   packInstances:  [],   // [{ _id, packName, packVersion, alertNamePrefix, vars }]
   rules:          [],
+  subscription: {
+    enabled:         false,
+    onLabels:        '',
+    groupLeftLabels: 'user',
+    metric:          '',
+  },
 })
+
+// ── Alert subscription wrapping ───────────────────────────────────────────────
+
+function wrapExpr(expr, sub) {
+  if (!sub?.enabled || !sub.metric || !expr) return expr
+  const onPart = sub.onLabels?.trim() ? `on(${sub.onLabels.trim()}) ` : ''
+  const glPart = sub.groupLeftLabels?.trim()
+    ? `group_left(${sub.groupLeftLabels.trim()}) `
+    : 'group_left() '
+  return `(${expr}) * ${onPart}${glPart}${sub.metric}`
+}
 
 // ── Pack template expansion ───────────────────────────────────────────────────
 
@@ -398,11 +416,18 @@ export default function AlertSuiteEditor() {
       }
     }))
 
+    const savedSub = s.subscription || {}
     setForm({
       groupName:   s.name || name,
       groupLabels,
       packInstances,
       rules,
+      subscription: {
+        enabled:         !!savedSub.enabled,
+        onLabels:        savedSub.onLabels        || '',
+        groupLeftLabels: savedSub.groupLeftLabels || 'user',
+        metric:          savedSub.metric          || '',
+      },
     })
     setSelected({ name, version })
     setIsNew(false)
@@ -566,6 +591,15 @@ export default function AlertSuiteEditor() {
       name:        form.groupName,
       groupLabels: kvArrayToObject(form.groupLabels),
       rules:       [...packExpandedRules, ...manualRules],
+    }
+
+    if (form.subscription?.enabled) {
+      alertSuite.subscription = {
+        enabled:         true,
+        onLabels:        form.subscription.onLabels.trim(),
+        groupLeftLabels: form.subscription.groupLeftLabels.trim(),
+        metric:          form.subscription.metric.trim(),
+      }
     }
 
     // Store pack instances and manual rules separately for UI state restoration
@@ -840,6 +874,62 @@ export default function AlertSuiteEditor() {
                   </div>
                 )
               })}
+            </div>
+
+            {/* Alert Subscription Wrapping */}
+            <div className="form-card">
+              <div className="form-card-title">
+                Alert Subscription
+                <label style={{ display: 'flex', gap: 6, alignItems: 'center', cursor: 'pointer', fontWeight: 400, fontSize: 12 }}>
+                  <input type="checkbox" checked={!!form.subscription?.enabled}
+                    onChange={e => setForm(f => ({ ...f, subscription: { ...f.subscription, enabled: e.target.checked } }))} />
+                  Enable wrapping
+                </label>
+              </div>
+              {!form.subscription?.enabled ? (
+                <p className="text-muted">
+                  When enabled, every rule expr is wrapped:
+                  <span style={{ fontFamily: 'monospace', marginLeft: 4 }}>
+                    {'(expr) * on(…) group_left(user) <metric>'}
+                  </span>
+                  — adds a subscription label to each alert firing for per-user routing.
+                </p>
+              ) : (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 10 }}>
+                    <div className="form-row" style={{ marginBottom: 0 }}>
+                      <label>Subscription Metric *</label>
+                      <input type="text" value={form.subscription.metric}
+                        placeholder="e.g. alert_subscriptions"
+                        onChange={e => setForm(f => ({ ...f, subscription: { ...f.subscription, metric: e.target.value } }))} />
+                    </div>
+                    <div className="form-row" style={{ marginBottom: 0 }}>
+                      <label>Join Labels <span style={{ fontSize: 10, color: '#9ca3af', fontWeight: 400 }}>on(…)</span></label>
+                      <input type="text" value={form.subscription.onLabels}
+                        placeholder="e.g. namespace, pod"
+                        onChange={e => setForm(f => ({ ...f, subscription: { ...f.subscription, onLabels: e.target.value } }))} />
+                    </div>
+                    <div className="form-row" style={{ marginBottom: 0 }}>
+                      <label>Carry-over Labels <span style={{ fontSize: 10, color: '#9ca3af', fontWeight: 400 }}>group_left(…)</span></label>
+                      <input type="text" value={form.subscription.groupLeftLabels}
+                        placeholder="e.g. user"
+                        onChange={e => setForm(f => ({ ...f, subscription: { ...f.subscription, groupLeftLabels: e.target.value } }))} />
+                    </div>
+                  </div>
+                  {form.subscription.metric && (
+                    <div style={{
+                      padding: '6px 10px', borderRadius: 4, background: '#f0fdf4',
+                      border: '1px solid #bbf7d0', fontSize: 12, fontFamily: 'monospace',
+                      color: '#166534', wordBreak: 'break-all',
+                    }}>
+                      {`(expr) * `}
+                      {form.subscription.onLabels?.trim() ? `on(${form.subscription.onLabels.trim()}) ` : ''}
+                      {`group_left(${form.subscription.groupLeftLabels?.trim() || ''}) `}
+                      {form.subscription.metric}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
 
             <div className="form-card">
