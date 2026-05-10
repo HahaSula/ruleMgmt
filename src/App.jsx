@@ -5,9 +5,11 @@ import ReceiversEditor from './pages/ReceiversEditor'
 import GitopsEditor from './pages/GitopsEditor'
 import PromQLEditor from './pages/PromQLEditor'
 import AlertmanagerSmartEditor from './pages/AlertmanagerSmartEditor'
+import AlertTypePackEditor from './pages/AlertTypePackEditor'
 
 const NAV_ITEMS = [
   { id: 'alert-type',   label: 'Alert Type',        icon: '⚡' },
+  { id: 'alert-pack',   label: 'Alert Pack',         icon: '📋' },
   { id: 'alert-suite',  label: 'Rule Group',         icon: '📦' },
   { id: 'receivers',    label: 'Receivers',          icon: '📣' },
   { id: 'amconfig',     label: 'AM Config',          icon: '🔀' },
@@ -35,6 +37,7 @@ export default function App() {
       </nav>
       <main className="content">
         {page === 'alert-type'  && <AlertTypeEditor />}
+        {page === 'alert-pack'  && <AlertTypePackEditor />}
         {page === 'alert-suite' && <AlertSuiteEditor />}
         {page === 'receivers'   && <ReceiversEditor />}
         {page === 'amconfig'    && <AlertmanagerSmartEditor />}

@@ -223,6 +223,9 @@ function VarInput({ type, value, onChange }) {
 
 // ── State factories ───────────────────────────────────────────────────────────
 
+let _uid = 0
+const uid = () => String(++_uid)
+
 const emptyRule = () => ({
   alertTypeName: '',
   alertTypeVersion: '',
@@ -236,21 +239,63 @@ const emptyRule = () => ({
   severity: 'warning',
 })
 
-const emptyForm = () => ({
-  groupName:   '',
-  groupLabels: [],   // [{key, value}]
-  rules: [],
+const emptyPackInstance = () => ({
+  _id: uid(),
+  packName: '',
+  packVersion: '',
+  alertNamePrefix: '',
+  vars: {},         // { varName: value }
 })
 
+const emptyForm = () => ({
+  groupName:      '',
+  groupLabels:    [],   // [{key, value}]
+  packInstances:  [],   // [{ _id, packName, packVersion, alertNamePrefix, vars }]
+  rules:          [],
+})
+
+// ── Pack template expansion ───────────────────────────────────────────────────
+
+function fillTpl(str, vars) {
+  return (str || '').replace(/\{\{\s*\.(\w+)\s*\}\}/g, (_, k) => vars[k] ?? `{{ .${k} }}`)
+}
+
+function expandPackInstance(packData, instance) {
+  if (!packData?.rules?.length) return []
+  const vars = { alertName: instance.alertNamePrefix, ...instance.vars }
+  return packData.rules.map(r => {
+    // r.labels is an object {severity: 'warning', team: 'platform', ...}
+    const ruleLabels = r.labels || {}
+    const severity = ruleLabels.severity ? fillTpl(String(ruleLabels.severity), vars) : 'warning'
+    const extraLabels = Object.entries(ruleLabels)
+      .filter(([k]) => k !== 'severity')
+      .map(([key, value]) => ({ key, value: fillTpl(String(value), vars) }))
+    return {
+      ...emptyRule(),
+      alertTypeName:    DIRECT_EXPR_TYPE,
+      alertTypeVersion: '',
+      ruleName:         fillTpl(r.ruleName, vars),
+      vars:             [{ key: 'expr', value: fillTpl(r.expr, vars), type: 'string' }],
+      exprMode:         'raw',
+      for:              r.for || '',
+      description:      fillTpl(r.description || '', vars),
+      severity,
+      labels:           extraLabels,
+    }
+  })
+}
+
 export default function AlertSuiteEditor() {
-  const [templates, setTemplates]   = useState({})
-  const [alertTypes, setAlertTypes] = useState({})
-  const [selected, setSelected]     = useState(null)
-  const [form, setForm]             = useState(emptyForm())
-  const [isNew, setIsNew]           = useState(false)
-  const [modal, setModal]           = useState(null)
-  const [status, setStatus]         = useState('')
-  const [product, setProduct]       = useState('')
+  const [templates, setTemplates]     = useState({})
+  const [alertTypes, setAlertTypes]   = useState({})
+  const [packTemplates, setPackTemplates] = useState({})
+  const [packDataCache, setPackDataCache] = useState({})
+  const [selected, setSelected]       = useState(null)
+  const [form, setForm]               = useState(emptyForm())
+  const [isNew, setIsNew]             = useState(false)
+  const [modal, setModal]             = useState(null)
+  const [status, setStatus]           = useState('')
+  const [product, setProduct]         = useState('')
   const [showPreview, setShowPreview] = useState(false)
   const [metricsDict, setMetricsDict] = useState([])
 
@@ -265,13 +310,15 @@ export default function AlertSuiteEditor() {
   const [varDeclCache, setVarDeclCache] = useState({})
 
   const load = useCallback(async () => {
-    const [suites, at, md] = await Promise.all([
+    const [suites, at, md, pt] = await Promise.all([
       listTemplates(TYPE),
       listTemplates('alert-type'),
       getMetricsDict(),
+      listTemplates('alert-type-pack'),
     ])
     setTemplates(suites)
     setAlertTypes(at)
+    setPackTemplates(pt)
     setMetricsDict(md.metrics || [])
     try {
       const r = await fetch('/api/defaults')
@@ -291,12 +338,24 @@ export default function AlertSuiteEditor() {
     return decls
   }
 
+  async function loadPackData(packName, packVersion) {
+    if (!packName || !packVersion) return null
+    const key = `${packName}@${packVersion}`
+    if (packDataCache[key]) return packDataCache[key]
+    const data = await getTemplate('alert-type-pack', packName, packVersion)
+    const parsed = data?.parsed || null
+    setPackDataCache(c => ({ ...c, [key]: parsed }))
+    return parsed
+  }
+
   async function selectVersion(name, version) {
     const data = await getTemplate(TYPE, name, version)
     if (!data) return
     const s = data.parsed?.alertSuite || {}
 
-    const rules = await Promise.all((s.rules || []).map(async r => {
+    // Use manualRules (UI-only rules) if saved, otherwise fall back to all rules
+    const rawRules = s.manualRules || s.rules || []
+    const rules = await Promise.all(rawRules.map(async r => {
       const isBuiltin = r.alertTypeName === DIRECT_EXPR_TYPE
       const decls = isBuiltin ? DIRECT_EXPR_VARS : await loadVarDecls(r.alertTypeName, r.alertTypeVersion)
       const savedVars = r.vars || {}
@@ -326,9 +385,23 @@ export default function AlertSuiteEditor() {
       groupLabels = [{ key: k.trim(), value: rest.join(':').trim() }]
     }
 
+    // Restore pack instances (load their data into cache eagerly)
+    const rawInstances = s.packInstances || []
+    const packInstances = await Promise.all(rawInstances.map(async inst => {
+      await loadPackData(inst.packName, inst.packVersion)
+      return {
+        _id:             uid(),
+        packName:        inst.packName        || '',
+        packVersion:     inst.packVersion     || '',
+        alertNamePrefix: inst.alertNamePrefix || '',
+        vars:            inst.vars            || {},
+      }
+    }))
+
     setForm({
       groupName:   s.name || name,
       groupLabels,
+      packInstances,
       rules,
     })
     setSelected({ name, version })
@@ -448,31 +521,60 @@ export default function AlertSuiteEditor() {
     setImportOpen(false)
   }
 
-  function buildPayload() {
-    return {
-      alertSuite: {
-        name:        form.groupName,
-        groupLabels: kvArrayToObject(form.groupLabels),
-        rules: form.rules.map(r => {
-          const isBuiltin = r.alertTypeName === DIRECT_EXPR_TYPE
-          const exprVal = isBuiltin ? directExprValue(r.vars) : (r.expr || '')
-          const obj = {
-            alertTypeName:    r.alertTypeName,
-            alertTypeVersion: isBuiltin ? undefined : r.alertTypeVersion,
-            ruleName:         r.ruleName,
-            vars:             kvArrayToObject(r.vars),
-            severity:         r.severity,
-          }
-          if (exprVal) obj.expr = exprVal
-          if (r.exprMode && r.exprMode !== 'raw') obj.exprMode = r.exprMode
-          if (r.for)         obj.for = r.for
-          if (r.description) obj.description = r.description
-          const labels = kvArrayToObject(r.labels)
-          if (Object.keys(labels).length) obj.labels = labels
-          return obj
-        }),
-      }
+  function serializeRule(r) {
+    const isBuiltin = r.alertTypeName === DIRECT_EXPR_TYPE
+    const exprVal = isBuiltin ? directExprValue(r.vars) : (r.expr || '')
+    const obj = {
+      alertTypeName:    r.alertTypeName,
+      alertTypeVersion: isBuiltin ? undefined : r.alertTypeVersion,
+      ruleName:         r.ruleName,
+      vars:             kvArrayToObject(r.vars),
+      severity:         r.severity,
     }
+    if (exprVal) obj.expr = exprVal
+    if (r.exprMode && r.exprMode !== 'raw') obj.exprMode = r.exprMode
+    if (r.for)         obj.for = r.for
+    if (r.description) obj.description = r.description
+    const labels = kvArrayToObject(r.labels || [])
+    if (Object.keys(labels).length) obj.labels = labels
+    return obj
+  }
+
+  function buildPayload() {
+    // Expand all pack instances into rules (Helm-renderable)
+    const packExpandedRules = form.packInstances.flatMap(inst => {
+      const packData = packDataCache[`${inst.packName}@${inst.packVersion}`]
+      if (!packData) return []
+      return expandPackInstance(packData, inst).map(r => {
+        const extraLabels = kvArrayToObject(r.labels || [])
+        return {
+          alertTypeName: DIRECT_EXPR_TYPE,
+          ruleName:      r.ruleName,
+          expr:          directExprValue(r.vars),
+          vars:          {},
+          severity:      r.severity,
+          ...(r.for         ? { for: r.for }               : {}),
+          ...(r.description ? { description: r.description } : {}),
+          ...(Object.keys(extraLabels).length ? { labels: extraLabels } : {}),
+        }
+      })
+    })
+
+    const manualRules = form.rules.map(serializeRule)
+
+    const alertSuite = {
+      name:        form.groupName,
+      groupLabels: kvArrayToObject(form.groupLabels),
+      rules:       [...packExpandedRules, ...manualRules],
+    }
+
+    // Store pack instances and manual rules separately for UI state restoration
+    if (form.packInstances.length > 0) {
+      alertSuite.packInstances = form.packInstances.map(({ _id, ...rest }) => rest)
+      alertSuite.manualRules   = manualRules
+    }
+
+    return { alertSuite }
   }
 
   async function handleSave(version) {
@@ -494,7 +596,39 @@ export default function AlertSuiteEditor() {
     setModal(v)
   }
 
-  const preview = useMemo(() => buildRuleGroupPreview(form, product), [form, product])
+  // ── Pack instance CRUD ─────────────────────────────────────────────────────
+
+  function addPackInstance() {
+    setForm(f => ({ ...f, packInstances: [...f.packInstances, emptyPackInstance()] }))
+  }
+  function removePackInstance(id) {
+    setForm(f => ({ ...f, packInstances: f.packInstances.filter(p => p._id !== id) }))
+  }
+  function updatePackInstance(id, changes) {
+    setForm(f => ({ ...f, packInstances: f.packInstances.map(p => p._id === id ? { ...p, ...changes } : p) }))
+  }
+  async function handlePackChange(id, packName, packVersion) {
+    const data = await loadPackData(packName, packVersion)
+    const vars = {}
+    if (data?.vars) for (const v of data.vars) vars[v.name] = ''
+    updatePackInstance(id, { packName, packVersion, vars })
+  }
+
+  // ── Preview (includes pack-expanded rules) ─────────────────────────────────
+
+  const allPreviewRules = useMemo(() => {
+    const packRules = form.packInstances.flatMap(inst => {
+      const packData = packDataCache[`${inst.packName}@${inst.packVersion}`]
+      if (!packData) return []
+      return expandPackInstance(packData, inst)
+    })
+    return [...packRules, ...form.rules]
+  }, [form.packInstances, form.rules, packDataCache])
+
+  const preview = useMemo(
+    () => buildRuleGroupPreview({ ...form, rules: allPreviewRules }, product),
+    [form, product, allPreviewRules]
+  )
 
   async function handleDelete() {
     if (!selected || !confirm(`Delete ${selected.name} @ ${selected.version}?`)) return
@@ -569,6 +703,143 @@ export default function AlertSuiteEditor() {
                   keyPlaceholder="label key" valuePlaceholder="value"
                 />
               </div>
+            </div>
+
+            {/* Pack Instances */}
+            <div className="form-card">
+              <div className="form-card-title">
+                Alert Pack Instances
+                <button className="btn btn-secondary btn-sm" onClick={addPackInstance}>+ Add Pack</button>
+              </div>
+              {form.packInstances.length === 0 ? (
+                <p className="text-muted">No packs. Add a pack to bulk-generate multiple related alert rules at once.</p>
+              ) : form.packInstances.map(inst => {
+                const packData = packDataCache[`${inst.packName}@${inst.packVersion}`]
+                const packVersions = packTemplates[inst.packName] || []
+                const expanded = packData ? expandPackInstance(packData, inst) : []
+                return (
+                  <div key={inst._id} style={{
+                    border: '1px solid #ddd6fe', borderRadius: 6, padding: 14, marginBottom: 10,
+                    background: '#faf5ff',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                      <span style={{ fontWeight: 600, fontSize: 13, color: '#6d28d9' }}>
+                        {inst.packName || 'New Pack Instance'}
+                        {inst.packVersion && (
+                          <span style={{ marginLeft: 6, fontSize: 11, color: '#7c3aed' }}>@ {inst.packVersion}</span>
+                        )}
+                        {packData && (
+                          <span style={{
+                            marginLeft: 8, fontSize: 11, background: '#ede9fe', color: '#5b21b6',
+                            padding: '1px 7px', borderRadius: 4,
+                          }}>
+                            {packData.rules?.length || 0} rules
+                          </span>
+                        )}
+                      </span>
+                      <button className="btn btn-danger btn-sm" onClick={() => removePackInstance(inst._id)}>Remove</button>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 10 }}>
+                      <div className="form-row" style={{ marginBottom: 0 }}>
+                        <label>Pack Template</label>
+                        <select value={inst.packName}
+                          onChange={e => handlePackChange(inst._id, e.target.value, '')}>
+                          <option value="">— select —</option>
+                          {Object.keys(packTemplates).map(n => <option key={n} value={n}>{n}</option>)}
+                        </select>
+                      </div>
+                      {inst.packName && (
+                        <div className="form-row" style={{ marginBottom: 0 }}>
+                          <label>Version</label>
+                          <select value={inst.packVersion}
+                            onChange={e => handlePackChange(inst._id, inst.packName, e.target.value)}>
+                            <option value="">— select —</option>
+                            {packVersions.map(v => <option key={v} value={v}>{v}</option>)}
+                          </select>
+                        </div>
+                      )}
+                      <div className="form-row" style={{ marginBottom: 0 }}>
+                        <label>
+                          Alert Name Prefix
+                          <span style={{ fontSize: 10, color: '#9ca3af', marginLeft: 5, fontWeight: 400 }}>
+                            {'→ {{ .alertName }}'}
+                          </span>
+                        </label>
+                        <input type="text" value={inst.alertNamePrefix} placeholder="e.g. high-cpu"
+                          onChange={e => updatePackInstance(inst._id, { alertNamePrefix: e.target.value })} />
+                      </div>
+                    </div>
+
+                    {/* Var inputs */}
+                    {packData?.vars?.length > 0 && (
+                      <div className="form-row" style={{ marginBottom: expanded.length ? 10 : 0 }}>
+                        <label>Pack Variables</label>
+                        <table className="kv-table" style={{ width: '100%', tableLayout: 'fixed' }}>
+                          <colgroup>
+                            <col style={{ width: '28%' }} />
+                            <col style={{ width: '14%' }} />
+                            <col />
+                          </colgroup>
+                          <thead><tr><th>var name</th><th>type</th><th>value</th></tr></thead>
+                          <tbody>
+                            {packData.vars.map(v => (
+                              <tr key={v.name}>
+                                <td>
+                                  <input type="text" value={v.name} readOnly
+                                    style={{ background: '#f9fafb', color: '#6b7280' }} />
+                                </td>
+                                <td>
+                                  <span style={{
+                                    fontSize: 11, background: '#ede9fe', color: '#5b21b6',
+                                    padding: '2px 6px', borderRadius: 4, display: 'inline-block',
+                                  }}>{v.type || 'string'}</span>
+                                </td>
+                                <td>
+                                  <VarInput
+                                    type={v.type || 'string'}
+                                    value={inst.vars[v.name] || ''}
+                                    onChange={val => updatePackInstance(inst._id, {
+                                      vars: { ...inst.vars, [v.name]: val },
+                                    })}
+                                  />
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    {/* Expanded rules preview */}
+                    {expanded.length > 0 && (
+                      <div style={{
+                        background: '#f1f0ff', borderRadius: 5, padding: '8px 12px',
+                        border: '1px solid #ddd6fe',
+                      }}>
+                        <div style={{ fontSize: 11, color: '#6b7280', fontWeight: 600, marginBottom: 5 }}>
+                          Will generate {expanded.length} rule{expanded.length !== 1 ? 's' : ''}:
+                        </div>
+                        {expanded.map((r, i) => (
+                          <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'baseline', marginBottom: 2 }}>
+                            <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#5b21b6', fontWeight: 600 }}>
+                              {r.ruleName || '—'}
+                            </span>
+                            <span style={{
+                              fontSize: 10, background: r.severity === 'critical' ? '#fee2e2' : r.severity === 'warning' ? '#fef3c7' : '#e0e7ff',
+                              color: r.severity === 'critical' ? '#b91c1c' : r.severity === 'warning' ? '#92400e' : '#3730a3',
+                              padding: '0 5px', borderRadius: 3, fontWeight: 600,
+                            }}>{r.severity}</span>
+                            <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {directExprValue(r.vars) || '—'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
 
             <div className="form-card">
