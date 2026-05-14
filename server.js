@@ -602,4 +602,27 @@ app.post('/api/prune-routes', (req, res) => {
   }
 })
 
+// ─── Rule Sets ───────────────────────────────────────────────────────────────
+
+const RULE_SETS_FILE = path.join(REPO_ROOT, 'config', 'rule-sets.json')
+
+app.get('/api/rulesets', async (req, res) => {
+  try {
+    const raw = await fs.readFile(RULE_SETS_FILE, 'utf-8')
+    res.json(JSON.parse(raw))
+  } catch {
+    res.json({ tree: [] })
+  }
+})
+
+app.post('/api/rulesets', async (req, res) => {
+  try {
+    await ensureDir(path.join(REPO_ROOT, 'config'))
+    await fs.writeFile(RULE_SETS_FILE, JSON.stringify(req.body, null, 2))
+    res.json({ ok: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.listen(3001, () => console.log('API server → http://localhost:3001'))

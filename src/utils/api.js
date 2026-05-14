@@ -170,6 +170,22 @@ export async function pruneRoutesAPI(routeRules, routeMatchers) {
   return res.json()  // { routeRules: [...nested...], stats: { before, after } }
 }
 
+// ─── Rule Sets ───────────────────────────────────────────────────────────────
+
+export async function getRuleSets() {
+  const res = await fetch(`${BASE}/rulesets`)
+  return res.json()
+}
+
+export async function saveRuleSets(data) {
+  const res = await fetch(`${BASE}/rulesets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  })
+  return res.json()
+}
+
 // ─── Helm render ──────────────────────────────────────────────────────────────
 
 export async function runHelmRender(product, site, relunit, stage) {

@@ -1,0 +1,74 @@
+{
+  "ruleSets": [
+    {
+      "id": "kxsjxdgr3lmp5n7jz9_set",
+      "name": "Default",
+      "tree": [
+        {
+          "id": "kxsjxdgr3lmp5n7jz9",
+          "name": "A",
+          "children": [
+            {
+              "id": "4n4vabpe3xmp5n7m5o",
+              "name": "B",
+              "children": [
+                {
+                  "id": "zfu16iedfzsmp5n7rkl",
+                  "name": "C",
+                  "children": [],
+                  "template": {
+                    "globalVars": [],
+                    "rules": [
+                      {
+                        "id": "eqk42ov4z0ump5n7xsv",
+                        "ruleName": "{{ .groupName }}-1",
+                        "expr": "A > {{.t1}}",
+                        "for": "5m",
+                        "severity": "warning",
+                        "vars": [
+                          {
+                            "id": "z8cl81n7m6lmp5n8733",
+                            "key": "t1",
+                            "default": ""
+                          }
+                        ]
+                      },
+                      {
+                        "id": "ne8fr9mtiimp5n85cm",
+                        "ruleName": "{{ .groupName }}-2",
+                        "expr": "A > {{.t2}}",
+                        "for": "5m",
+                        "severity": "warning",
+                        "vars": [
+                          {
+                            "id": "lipe5mp18zmp5n97es",
+                            "key": "t2",
+                            "default": ""
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "rows": [
+                    {
+                      "id": "1yam0jtqb2gmp5n939j",
+                      "vars": {
+                        "groupName": "A.B.C",
+                        "t1": "",
+                        "t2": ""
+                      }
+                    }
+                  ]
+                }
+              ],
+              "template": { "globalVars": [], "rules": [] },
+              "rows": []
+            }
+          ],
+          "template": { "globalVars": [], "rules": [] },
+          "rows": []
+        }
+      ]
+    }
+  ]
+}
