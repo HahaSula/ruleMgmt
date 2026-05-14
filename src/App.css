@@ -25,6 +25,11 @@ body {
   gap: 2px;
 }
 
+.sidebar-folded {
+  width: 48px;
+  min-width: 48px;
+}
+
 .sidebar-title {
   font-size: 13px;
   font-weight: 700;
@@ -33,7 +38,35 @@ body {
   padding: 0 16px 16px;
   border-bottom: 1px solid #313244;
   margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
+
+.sidebar-fold-btn {
+  background: none;
+  border: none;
+  color: #6c7086;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.sidebar-fold-btn:hover { color: #cdd6f4; background: #313244; }
+.sidebar-folded .sidebar-fold-btn {
+  display: block;
+  margin: 0 auto 8px;
+  padding: 6px;
+  font-size: 18px;
+}
+
+.nav-item-icon {
+  justify-content: center;
+  padding: 10px 0;
+}
+.nav-item-icon .nav-icon { margin: 0; }
 
 .nav-item {
   display: flex;
@@ -387,3 +420,122 @@ select { cursor: pointer; }
   margin-bottom: 6px;
 }
 .severity-row select, .severity-row input { flex: 1; }
+
+/* ── Rule Table Editor ───────────────────────────────────── */
+.panel-fold-strip {
+  width: 24px;
+  min-width: 24px;
+  background: #fff;
+  border-right: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding-top: 12px;
+  gap: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.panel-fold-strip:hover { background: #f3f4f6; }
+.panel-fold-label {
+  writing-mode: vertical-rl;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7280;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.panel-fold-icon {
+  font-size: 14px;
+  color: #9ca3af;
+  margin-top: 4px;
+}
+
+.rule-set-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  border-radius: 4px;
+  margin: 1px 6px;
+  user-select: none;
+}
+.rule-set-item:hover { background: #f3f4f6; }
+.rule-set-item.active { background: #ede9fe; color: #7c3aed; font-weight: 600; }
+.rule-set-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rule-set-item .tree-node-actions { display: none; }
+.rule-set-item:hover .tree-node-actions,
+.rule-set-item.active .tree-node-actions { display: flex; }
+.tree-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  margin: 1px 6px;
+  font-size: 13px;
+  user-select: none;
+}
+.tree-node:hover { background: #f3f4f6; }
+.tree-node.active { background: #ede9fe; color: #7c3aed; }
+
+.tree-node-icon { font-size: 9px; color: #9ca3af; flex-shrink: 0; width: 12px; }
+.tree-node.active .tree-node-icon { color: #7c3aed; }
+
+.tree-node-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.tree-node-actions { display: none; gap: 2px; margin-left: auto; flex-shrink: 0; align-items: center; }
+.tree-node:hover .tree-node-actions,
+.tree-node.active .tree-node-actions { display: flex; }
+.tree-node-actions button {
+  background: none; border: 1px solid transparent; cursor: pointer;
+  padding: 2px 5px; font-size: 11px; border-radius: 3px; color: #6b7280; line-height: 1;
+}
+.tree-node-actions button:hover { background: #e5e7eb; color: #374151; }
+.tree-mode-btn {
+  font-size: 10px !important; padding: 2px 6px !important;
+  border: 1px solid #d1d5db !important; background: #f9fafb !important;
+  color: #374151 !important; font-weight: 500;
+}
+.tree-mode-btn:hover { background: #e5e7eb !important; }
+.tree-mode-btn.active { background: #7c3aed !important; color: #fff !important; border-color: #7c3aed !important; }
+
+.tree-rename-input {
+  flex: 1; font-size: 13px; padding: 1px 6px;
+  border: 1px solid #7c3aed; border-radius: 3px; outline: none;
+  background: #fff; width: 0; min-width: 80px;
+}
+
+.rule-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.rule-table th, .rule-table td {
+  border: 1px solid #e5e7eb;
+  padding: 4px 6px;
+  text-align: left;
+}
+.rule-table th {
+  background: #f9fafb;
+  font-weight: 600;
+  color: #374151;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.rule-table tbody tr:hover { background: #fafafa; }
+.rule-table td input[type="text"] {
+  width: 100%; border: none; background: transparent;
+  font-size: 13px; padding: 2px 2px; outline: none; border-radius: 0;
+  box-shadow: none;
+}
+.rule-table td input[type="text"]:focus {
+  background: #f0f9ff; border-radius: 3px;
+  box-shadow: inset 0 0 0 1px #7c3aed;
+}
